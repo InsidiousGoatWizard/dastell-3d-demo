@@ -1,0 +1,4248 @@
+import * as THREE from
+    "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js";
+
+
+import { OrbitControls } from
+    "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/controls/OrbitControls.js";
+
+
+/* ============================================================
+ *
+ * GLOBALS
+ *
+ * ============================================================ */
+
+
+const consoleInput = document.getElementById("consoleInput");
+const consoleOutput = document.getElementById("consoleOutput");
+const consoleExecute = document.getElementById("executeCommand");
+const pythonFileInput = document.getElementById("pythonFileInput");
+const ui = document.getElementById("ui");
+const codeInspector = document.getElementById("codeInspector");
+const codeInspectorTitle = document.getElementById("codeInspectorTitle");
+const codeInspectorContent = document.getElementById("codeInspectorContent");
+const pushCodeModification = document.getElementById("pushCodeModification");
+const viewer = document.getElementById("viewer");
+const modelInfo = document.getElementById("modelInfo");
+const cameraInfo = document.getElementById("cameraInfo");
+const errorElement = document.getElementById("error");
+const geminiApiKey =
+    "AQ.Ab8RN6KDjiwVPz62OpypCJhDcqdO4weg8NatfhS-UJDbn0p1BA";
+const geminiTtsEndpoint =
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent";
+let modelData = null;
+let texture = null;
+let tableData = null;
+let tableTexture = null;
+let daggerData = null;
+let daggerObject = null;
+let daggerTexture1 = null;
+let daggerTexture2 = null;
+let modelRoot = new THREE.Group();
+const armJoints = {};
+const thumbJoints = {};
+const grabbableObjects = [];
+
+/*
+ * Joint rotation limits.
+ *
+ * Every joint axis is limited to a total range of 180 degrees:
+ * -90 degrees through +90 degrees.
+ *
+ * Three.js stores Euler rotations in radians, so all limits are
+ * converted to radians once here.
+ */
+const JOINT_MIN_ROTATION =
+    THREE.MathUtils.degToRad(-90);
+
+const JOINT_MAX_ROTATION =
+    THREE.MathUtils.degToRad(90);
+
+function clampJointRotation(
+    angle
+) {
+    return THREE.MathUtils.clamp(
+        angle,
+        JOINT_MIN_ROTATION,
+        JOINT_MAX_ROTATION
+    );
+}
+
+function clampJoint(
+    joint
+) {
+    if (!joint) {
+        return;
+    }
+
+    joint.rotation.x =
+        clampJointRotation(
+            joint.rotation.x
+        );
+
+    joint.rotation.y =
+        clampJointRotation(
+            joint.rotation.y
+        );
+
+    joint.rotation.z =
+        clampJointRotation(
+            joint.rotation.z
+        );
+}
+const groupHighlightLines = [];
+const groupHighlightMaterial =
+    new THREE.LineBasicMaterial({
+        color: 0xff0000,
+        depthTest: true,
+        depthWrite: true,
+        toneMapped: true
+    });
+const waveClock = new THREE.Clock();
+let lWaveAnimationEnabled = false;
+let rWaveAnimationEnabled = false;
+let resetAnimation = null;
+let eyesLookingRight = false;
+let speechAudioContext = null;
+const handCanGrab = {
+    L: false,
+    R: false
+};
+const handIsHolding = {
+    L: false,
+    R: false
+};
+const loadedPythonFiles = new Map();
+const scriptedRotations = [];
+const scriptedCycles = [];
+const activeSpeech = new Set();
+const commandHistory = [];
+let commandHistoryIndex = -1;
+let commandHistoryDraft = "";
+let executingPythonFile = null;
+let inspectedPythonFile = null;
+
+
+function positionCodeInspector() {
+    codeInspector.style.top =
+        `${ui.offsetTop + ui.offsetHeight + 10}px`;
+}
+
+
+positionCodeInspector();
+
+
+const uiResizeObserver =
+    new ResizeObserver(
+        positionCodeInspector
+    );
+
+
+uiResizeObserver.observe(
+    ui
+);
+
+
+/*
+ * Minecraft/Blockbench coordinates are treated as:
+ *
+ * X = left/right
+ * Y = up/down
+ * Z = front/back
+ *
+ * Three.js uses the same handed coordinate convention for
+ * this purpose, so no global conversion is necessary.
+ */
+
+
+/* ============================================================
+ *
+ * SCENE
+ *
+ * ============================================================ */
+
+
+const scene =
+    new THREE.Scene();
+
+
+scene.background =
+    null;
+
+
+/* ============================================================
+ *
+ * CAMERA
+ *
+ * ============================================================ */
+
+
+const camera =
+    new THREE.PerspectiveCamera(
+        50,
+        window.innerWidth / window.innerHeight,
+        0.01,
+        10000
+    );
+
+
+camera.position.set(25, 20, -25);
+
+camera.lookAt(0, 0, 0);
+
+
+/* ============================================================
+ *
+ * RENDERER
+ *
+ * ============================================================ */
+
+
+const renderer =
+    new THREE.WebGLRenderer({
+        antialias: false,
+        alpha: true
+    });
+
+
+renderer.setPixelRatio(
+    window.devicePixelRatio
+);
+
+
+renderer.setSize(
+    window.innerWidth,
+    window.innerHeight
+);
+
+
+renderer.outputColorSpace =
+    THREE.SRGBColorSpace;
+
+
+viewer.appendChild(
+    renderer.domElement
+);
+
+
+const controls =
+    new OrbitControls(
+        camera,
+        renderer.domElement
+    );
+
+
+controls.enableDamping =
+    true;
+
+
+controls.minDistance =
+    15;
+
+
+controls.maxDistance =
+    75;
+
+
+controls.target.set(
+    0,
+    0,
+    0
+);
+
+
+controls.update();
+
+
+/* ============================================================
+ *
+ * LIGHTING
+ *
+ * ============================================================ */
+
+
+const ambientLight =
+    new THREE.AmbientLight(
+        0xffffff,
+        0.2
+    );
+
+
+scene.add(
+    ambientLight
+);
+
+
+const directionalLight =
+    new THREE.DirectionalLight(
+        0xffffff,
+        3
+    );
+
+
+directionalLight.position.set(
+    -10,
+    50,
+    30
+);
+
+
+scene.add(
+    directionalLight
+);
+
+
+/* ============================================================
+ *
+ * STATIC ASSETS
+ *
+ * ============================================================ */
+
+
+const assetCacheVersion =
+    Date.now();
+
+
+function getAssetUrl(
+    path
+) {
+
+    return `${path}?v=${assetCacheVersion}`;
+}
+
+
+function getDeclaredTexturePath(
+    assetData,
+    fallbackName
+) {
+
+    const declaredTexture =
+        assetData?.textures?.["0"] ||
+        fallbackName;
+
+
+    const textureName =
+        String(declaredTexture)
+            .split("/")
+            .pop()
+            .replace(/\.(png|jpg|jpeg|webp)$/i, "");
+
+
+    return getAssetUrl(
+        `src/${textureName}.png`
+    );
+}
+
+
+async function loadDefaultAssets() {
+
+    try {
+
+        if (window.location.protocol === "file:") {
+
+            modelData =
+                await new Promise(
+                    (resolve, reject) => {
+
+                        const request =
+                            new XMLHttpRequest();
+
+                        request.open(
+                            "GET",
+                            "src/model.json",
+                            true
+                        );
+
+                        request.onload =
+                            () => {
+
+                                if (request.status === 0 ||
+                                    (request.status >= 200 &&
+                                        request.status < 300)) {
+
+                                    try {
+                                        resolve(
+                                            JSON.parse(
+                                                request.responseText
+                                            )
+                                        );
+                                    } catch (error) {
+                                        reject(error);
+                                    }
+
+                                    return;
+                                }
+
+                                reject(
+                                    new Error(
+                                        `Could not load src/model.json (${request.status})`
+                                    )
+                                );
+                            };
+
+                        request.onerror =
+                            () => reject(
+                                new Error(
+                                    "Could not load src/model.json"
+                                )
+                            );
+
+                        request.send();
+                    }
+                );
+        } else {
+
+            const modelResponse =
+                await fetch("src/model.json");
+
+
+            if (!modelResponse.ok) {
+                throw new Error(
+                    `Could not load src/model.json (${modelResponse.status})`
+                );
+            }
+
+
+            modelData =
+                await modelResponse.json();
+        }
+
+
+        if (window.location.protocol === "file:") {
+
+            tableData =
+                await new Promise(
+                    (resolve, reject) => {
+
+                        const request =
+                            new XMLHttpRequest();
+
+                        request.open(
+                            "GET",
+                            "src/table.json",
+                            true
+                        );
+
+                        request.onload =
+                            () => {
+
+                                if (request.status === 0 ||
+                                    (request.status >= 200 &&
+                                        request.status < 300)) {
+
+                                    try {
+                                        resolve(
+                                            JSON.parse(
+                                                request.responseText
+                                            )
+                                        );
+                                    } catch (error) {
+                                        reject(error);
+                                    }
+
+                                    return;
+                                }
+
+                                reject(
+                                    new Error(
+                                        `Could not load src/table.json (${request.status})`
+                                    )
+                                );
+                            };
+
+                        request.onerror =
+                            () => reject(
+                                new Error(
+                                    "Could not load src/table.json"
+                                )
+                            );
+
+                        request.send();
+                    }
+                );
+
+        } else {
+
+            const tableResponse =
+                await fetch("src/table.json");
+
+
+            if (!tableResponse.ok) {
+                throw new Error(
+                    `Could not load src/table.json (${tableResponse.status})`
+                );
+            }
+
+
+            tableData =
+                await tableResponse.json();
+        }
+
+
+        if (window.location.protocol === "file:") {
+
+            daggerData =
+                await new Promise(
+                    (resolve, reject) => {
+
+                        const request =
+                            new XMLHttpRequest();
+
+                        request.open(
+                            "GET",
+                            "src/test_dagger.json",
+                            true
+                        );
+
+                        request.onload =
+                            () => {
+
+                                if (request.status === 0 ||
+                                    (request.status >= 200 &&
+                                        request.status < 300)) {
+
+                                    try {
+                                        resolve(
+                                            JSON.parse(
+                                                request.responseText
+                                            )
+                                        );
+                                    } catch (error) {
+                                        reject(error);
+                                    }
+
+                                    return;
+                                }
+
+                                reject(
+                                    new Error(
+                                        `Could not load src/test_dagger.json (${request.status})`
+                                    )
+                                );
+                            };
+
+                        request.onerror =
+                            () => reject(
+                                new Error(
+                                    "Could not load src/test_dagger.json"
+                                )
+                            );
+
+                        request.send();
+                    }
+                );
+
+        } else {
+
+            const daggerResponse =
+                await fetch("src/test_dagger.json");
+
+
+            if (!daggerResponse.ok) {
+                throw new Error(
+                    `Could not load src/test_dagger.json (${daggerResponse.status})`
+                );
+            }
+
+
+            daggerData =
+                await daggerResponse.json();
+        }
+
+
+        const textureLoader =
+            new THREE.TextureLoader();
+
+
+        [texture, tableTexture, daggerTexture1, daggerTexture2] =
+            await Promise.all([
+                new Promise(
+                    (resolve, reject) => {
+                        textureLoader.load(
+                            getDeclaredTexturePath(
+                                modelData,
+                                "model-texture"
+                            ),
+                            resolve,
+                            undefined,
+                            reject
+                        );
+                    }
+                ),
+                new Promise(
+                    (resolve, reject) => {
+                        textureLoader.load(
+                            getAssetUrl(
+                                "src/table-texture.png"
+                            ),
+                            resolve,
+                            undefined,
+                            reject
+                        );
+                    }
+                ),
+                new Promise(
+                    (resolve, reject) => {
+                        textureLoader.load(
+                            getAssetUrl(
+                                "src/dagger_texture_1.png"
+                            ),
+                            resolve,
+                            undefined,
+                            reject
+                        );
+                    }
+                ),
+                new Promise(
+                    (resolve, reject) => {
+                        textureLoader.load(
+                            getAssetUrl(
+                                "src/dagger_texture_2.png"
+                            ),
+                            resolve,
+                            undefined,
+                            reject
+                        );
+                    }
+                )
+            ]);
+
+
+        for (const assetTexture of [
+            texture,
+            tableTexture,
+            daggerTexture1,
+            daggerTexture2
+        ]) {
+            assetTexture.colorSpace =
+                THREE.SRGBColorSpace;
+
+
+            assetTexture.magFilter =
+                THREE.NearestFilter;
+
+
+            assetTexture.minFilter =
+                THREE.NearestFilter;
+        }
+
+
+        errorElement.textContent = "";
+
+        rebuildModel();
+
+    } catch (error) {
+
+        console.error(error);
+
+        errorElement.textContent =
+            "Failed to load default assets:\n" +
+            error.message;
+    }
+}
+
+
+loadDefaultAssets();
+
+
+/* ============================================================
+ *
+ * REBUILD MODEL
+ *
+ * ============================================================ */
+
+
+function rebuildModel() {
+
+    if (!modelData || !tableData || !daggerData) {
+        return;
+    }
+
+
+    clearGroupHighlight();
+
+
+    /*
+     * Remove old model.
+     */
+
+    scene.remove(
+        modelRoot
+    );
+
+
+    modelRoot =
+        new THREE.Group();
+
+    for (
+        const jointName of Object.keys(armJoints)
+    ) {
+
+        delete armJoints[jointName];
+    }
+
+    for (
+        const side of Object.keys(thumbJoints)
+    ) {
+        delete thumbJoints[side];
+    }
+
+    grabbableObjects.length = 0;
+    daggerObject = null;
+
+
+    scene.add(
+        modelRoot
+    );
+
+
+    const robotRoot =
+        buildAsset(
+            modelData,
+            texture,
+            4,
+            false,
+            [27, 39]
+        );
+
+
+    const tableRoot =
+        buildAsset(
+            tableData,
+            tableTexture,
+            8,
+            true
+        );
+
+
+    const daggerPlacement =
+        new THREE.Group();
+
+
+    daggerObject = daggerPlacement;
+    daggerObject.userData.canGrab =
+        daggerData.can_grab === true;
+
+
+    const daggerRoot =
+        buildAsset(
+            daggerData,
+            [daggerTexture1, daggerTexture2],
+            1
+        );
+
+
+    daggerRoot.position.set(
+        -8,
+        6.0,
+        -10
+    );
+
+
+    daggerRoot.scale.setScalar(
+        0.5
+    );
+
+
+    daggerPlacement.add(
+        daggerRoot
+    );
+
+
+    daggerPlacement.rotation.x =
+        Math.PI;
+
+
+    daggerPlacement.rotation.y =
+        THREE.MathUtils.degToRad(
+            -45
+        );
+
+
+    daggerPlacement.rotation.z =
+        THREE.MathUtils.degToRad(
+            -5
+        );
+
+
+    daggerPlacement.position.set(
+        15,
+        15.5,
+        8
+    );
+
+
+    grabbableObjects.push(
+        daggerObject
+    );
+
+
+    modelRoot.add(
+        robotRoot,
+        tableRoot,
+        daggerPlacement
+    );
+
+
+    setEyeGaze(
+        eyesLookingRight
+    );
+
+
+    /*
+     * Center model.
+     */
+
+    frameModel();
+
+
+    /*
+     * Update information.
+
+     */
+
+    modelInfo.textContent =
+        "Elements: " +
+        (modelData.elements || []).length +
+        " + table " +
+        (tableData.elements || []).length +
+        "\nGroups: " +
+        (countGroups(modelData.groups || []) +
+            countGroups(tableData.groups || []));
+
+}
+
+
+function buildAsset(
+    assetData,
+    assetTexture,
+    uvScale,
+    flipVerticalSideUVs = false,
+    flipAllUVs = []
+) {
+
+    const assetRoot =
+        new THREE.Group();
+
+
+    const elements =
+        assetData.elements || [];
+
+
+    const groups =
+        assetData.groups || [];
+
+
+    const meshes = [];
+
+
+    for (
+        let i = 0;
+        i < elements.length;
+        i++
+    ) {
+
+        const mesh =
+            createCube(
+                elements[i],
+                assetData,
+                assetTexture,
+                uvScale,
+                flipVerticalSideUVs === true ||
+                    flipVerticalSideUVs.includes?.(i),
+                flipAllUVs.includes(i)
+            );
+
+
+        mesh.userData.elementIndex =
+            i;
+
+
+        meshes[i] =
+            mesh;
+    }
+
+
+    if (groups.length > 0) {
+
+        for (
+            const group of groups
+        ) {
+
+            buildGroup(
+                group,
+                assetRoot,
+                meshes,
+                elements
+            );
+        }
+
+    } else {
+
+        for (
+            const mesh of meshes
+        ) {
+
+            assetRoot.add(
+                mesh
+            );
+        }
+    }
+
+
+    return assetRoot;
+}
+
+
+/* ============================================================
+ *
+ * CREATE CUBE
+ *
+ * ============================================================ */
+
+
+function createCube(
+    element,
+    assetData,
+    assetTexture,
+    uvScale,
+    flipVerticalSideUVs,
+    flipAllUVs
+) {
+
+    const from =
+        element.from;
+
+
+    const to =
+        element.to;
+
+
+    /*
+     * Dimensions.
+     */
+
+    const width =
+        Math.abs(
+            to[0] - from[0]
+        );
+
+
+    const height =
+        Math.abs(
+            to[1] - from[1]
+        );
+
+
+    const depth =
+        Math.abs(
+            to[2] - from[2]
+        );
+
+
+    /*
+     * Center.
+     */
+
+    const center =
+        new THREE.Vector3(
+            (from[0] + to[0]) / 2,
+            (from[1] + to[1]) / 2,
+            (from[2] + to[2]) / 2
+        );
+
+
+    /*
+     * Create geometry.
+
+     *
+     * We use a custom BoxGeometry because every
+     * face can have a different Blockbench UV.
+     */
+
+    const geometry =
+        new THREE.BoxGeometry(
+            width,
+            height,
+            depth
+        );
+
+
+    /*
+     * Create six materials:
+     *
+     * +X = east
+     * -X = west
+     * +Y = up
+     * -Y = down
+     * +Z = south
+     * -Z = north
+     */
+
+    const faces = [
+        "east",
+        "west",
+        "up",
+        "down",
+        "south",
+        "north"
+    ];
+
+
+    const materials = [];
+
+
+    for (
+        const faceName of faces
+    ) {
+
+        const face =
+            element.faces?.[faceName];
+
+
+        materials.push(
+            createFaceMaterial(
+                face,
+                assetTexture
+            )
+        );
+    }
+
+
+    /*
+     * Apply the materials.
+     */
+
+    const mesh =
+        new THREE.Mesh(
+            geometry,
+            materials
+        );
+
+
+    mesh.position.copy(
+        center
+    );
+
+
+    mesh.name =
+        element.name ||
+        "cube";
+
+
+    /*
+     * Apply the UV coordinates.
+
+     */
+
+    applyFaceUVs(
+        geometry,
+        element,
+        assetData,
+        uvScale,
+        flipVerticalSideUVs,
+        flipAllUVs
+    );
+
+
+    if (
+        element.name === "eyeL" ||
+        element.name === "eyeR"
+    ) {
+        mesh.userData.isEye = true;
+        mesh.userData.defaultUVs =
+            Float32Array.from(
+                geometry.attributes.uv.array
+            );
+    }
+
+
+    /*
+     * Blockbench cube rotation.
+
+     */
+
+    if (element.rotation) {
+
+        applyCubeRotation(
+            mesh,
+            element.rotation
+        );
+    }
+
+
+    return mesh;
+}
+
+
+/* ============================================================
+ *
+ * FACE MATERIAL
+ *
+ * ============================================================ */
+
+
+function createFaceMaterial(
+    face,
+    assetTexture
+) {
+
+    const faceTexture =
+        Array.isArray(assetTexture)
+            ? assetTexture[
+                Number(
+                    String(face?.texture || "#0")
+                        .replace("#", "")
+                )
+            ] || assetTexture[0]
+            : assetTexture;
+
+    /*
+     * If there is no texture, use a neutral
+     * material.
+     */
+
+    if (
+        !face ||
+        !faceTexture
+    ) {
+
+        return new THREE.MeshStandardMaterial({
+            color: 0xb0b0b0,
+            roughness: 0.8
+        });
+    }
+
+
+    const material =
+        new THREE.MeshStandardMaterial({
+            map: faceTexture,
+            color: 0xffffff,
+
+            alphaTest: 0.5,
+            transparent: true,
+            depthWrite: true,
+
+            roughness: 0.8,
+
+            side: THREE.DoubleSide
+        });
+
+
+    return material;
+}
+
+
+/* ============================================================
+ *
+ * UV MAPPING
+ *
+ * ============================================================ */
+
+
+function applyFaceUVs(
+    geometry,
+    element,
+    assetData,
+    uvScale,
+    flipVerticalSideUVs,
+    flipAllUVs
+) {
+
+    const uvAttribute =
+        geometry.attributes.uv;
+
+
+    const textureSize =
+        assetData.texture_size ||
+        [16, 16];
+
+
+    const textureWidth =
+        textureSize[0] /
+        uvScale;
+
+
+    const textureHeight =
+        textureSize[1] /
+        uvScale;
+
+
+    /*
+     * BoxGeometry's groups correspond to:
+     *
+     * 0 = +X
+     * 1 = -X
+     * 2 = +Y
+     * 3 = -Y
+     * 4 = +Z
+     * 5 = -Z
+     *
+     */
+
+    const faces = [
+        "east",
+        "west",
+        "up",
+        "down",
+        "south",
+        "north"
+    ];
+
+
+    for (
+        let faceIndex = 0;
+        faceIndex < 6;
+        faceIndex++
+    ) {
+
+        const faceName =
+            faces[faceIndex];
+
+
+        const face =
+            element.faces?.[faceName];
+
+
+        if (
+            !face ||
+            !face.uv
+        ) {
+            continue;
+        }
+
+
+        let [
+            u1,
+            v1,
+            u2,
+            v2
+        ] = face.uv;
+
+
+        /*
+         * Blockbench UVs are pixel coordinates.
+         */
+
+        u1 /= textureWidth;
+        u2 /= textureWidth;
+
+        v1 =
+            1 -
+            v1 / textureHeight;
+
+        v2 =
+            1 -
+            v2 / textureHeight;
+
+
+        /*
+         * BoxGeometry has four vertices per face.
+
+         *
+         * Find the appropriate four vertices.
+         */
+
+        const start =
+            faceIndex * 4;
+
+
+        /*
+         * Blockbench can intentionally provide:
+         *
+         *     [10, 10, 0, 0]
+         *
+         * instead of:
+         *
+         *     [0, 0, 10, 10]
+         *
+         */
+
+            const standardFaceUVs =
+                [u1, v2, u2, v2, u1, v1, u2, v1];
+
+
+            const verticallyFlippedFaceUVs =
+                [u1, v1, u2, v1, u1, v2, u2, v2];
+
+
+            const faceUVs =
+                (flipAllUVs ||
+                    (flipVerticalSideUVs &&
+                faceName !== "up" &&
+                faceName !== "down"))
+                    ? verticallyFlippedFaceUVs
+                    : standardFaceUVs;
+
+
+        for (
+            let vertexIndex = 0;
+            vertexIndex < 4;
+            vertexIndex++
+        ) {
+
+            uvAttribute.setXY(
+                start + vertexIndex,
+                faceUVs[vertexIndex * 2],
+                faceUVs[vertexIndex * 2 + 1]
+            );
+        }
+    }
+
+
+    uvAttribute.needsUpdate =
+        true;
+}
+
+
+function setEyeGaze(
+    lookRight
+) {
+
+    modelRoot.traverse(
+        object => {
+
+            if (
+                !object.userData?.isEye
+            ) {
+                return;
+            }
+
+
+            const uvAttribute =
+                object.geometry.attributes.uv;
+
+            const defaultUVs =
+                object.userData.defaultUVs;
+
+
+            for (
+                let faceIndex = 0;
+                faceIndex < 6;
+                faceIndex++
+            ) {
+
+                const firstUVIndex =
+                    faceIndex * 8;
+
+                const uValues = [
+                    defaultUVs[firstUVIndex],
+                    defaultUVs[firstUVIndex + 2],
+                    defaultUVs[firstUVIndex + 4],
+                    defaultUVs[firstUVIndex + 6]
+                ];
+
+                const minimumU =
+                    Math.min(...uValues);
+
+                const maximumU =
+                    Math.max(...uValues);
+
+                const vValues = [
+                    defaultUVs[firstUVIndex + 1],
+                    defaultUVs[firstUVIndex + 3],
+                    defaultUVs[firstUVIndex + 5],
+                    defaultUVs[firstUVIndex + 7]
+                ];
+
+                const minimumV =
+                    Math.min(...vValues);
+
+                const maximumV =
+                    Math.max(...vValues);
+
+
+                for (
+                    let vertexIndex = 0;
+                    vertexIndex < 4;
+                    vertexIndex++
+                ) {
+
+                    const uvIndex =
+                        firstUVIndex + vertexIndex * 2;
+
+                    const defaultU =
+                        defaultUVs[uvIndex];
+
+                    uvAttribute.array[uvIndex] =
+                        lookRight
+                            ? minimumU + maximumU - defaultU
+                            : defaultU;
+
+                    uvAttribute.array[uvIndex + 1] =
+                        minimumV +
+                        maximumV -
+                        defaultUVs[uvIndex + 1];
+                }
+            }
+
+
+            uvAttribute.needsUpdate =
+                true;
+        }
+    );
+}
+
+
+/* ============================================================
+ *
+ * CUBE ROTATION
+ *
+ * ============================================================ */
+
+
+function applyCubeRotation(
+    mesh,
+    rotation
+) {
+
+    /*
+     * Your JSON uses two slightly different
+     * representations:
+     *
+     *     { x, y, z, origin }
+     *
+     * and:
+     *
+     *     { angle, axis, origin }
+     *
+     * Both are supported.
+     */
+
+
+    const origin =
+        rotation.origin ||
+        [0, 0, 0];
+
+
+    const pivot =
+        new THREE.Group();
+
+
+    /*
+     * The pivot itself is initially positioned
+     * at the rotation origin.
+     *
+     * The parent/group transformation will be
+     * corrected later by buildGroup().
+     */
+
+    pivot.userData.blockbenchOrigin =
+        new THREE.Vector3(
+            origin[0],
+            origin[1],
+            origin[2]
+        );
+
+
+    /*
+     * Mesh currently has a WORLD position.
+     *
+     * Move it relative to the rotation pivot.
+     */
+
+    mesh.position.sub(
+        pivot.userData.blockbenchOrigin
+    );
+
+
+    pivot.add(
+        mesh
+    );
+
+
+    /*
+     * axis + angle format
+     */
+
+    if (
+        rotation.axis !== undefined
+    ) {
+
+        const angle =
+            THREE.MathUtils.degToRad(
+                rotation.angle || 0
+            );
+
+
+        if (
+            rotation.axis === "x"
+        ) {
+
+            pivot.rotation.x =
+                angle;
+
+        } else if (
+            rotation.axis === "y"
+        ) {
+
+            pivot.rotation.y =
+                angle;
+
+        } else if (
+            rotation.axis === "z"
+        ) {
+
+            pivot.rotation.z =
+                angle;
+        }
+    }
+
+
+    /*
+     * x/y/z format
+     */
+
+    else {
+
+        pivot.rotation.x =
+            THREE.MathUtils.degToRad(
+                rotation.x || 0
+            );
+
+
+        pivot.rotation.y =
+            THREE.MathUtils.degToRad(
+                rotation.y || 0
+            );
+
+
+        pivot.rotation.z =
+            THREE.MathUtils.degToRad(
+                rotation.z || 0
+            );
+    }
+
+
+    /*
+     * Store the original origin.
+
+     */
+
+    pivot.userData.isRotationPivot =
+        true;
+
+
+    pivot.userData.tPoseRotation =
+        pivot.rotation.clone();
+
+
+    /*
+     * Replace mesh with the pivot.
+
+     */
+
+    mesh.userData.rotationPivot =
+        pivot;
+
+
+    return pivot;
+}
+
+
+/* ============================================================
+ *
+ * BUILD GROUP
+ *
+ * ============================================================ */
+
+
+function buildGroup(
+    groupData,
+    parent,
+    meshes,
+    elements
+) {
+
+    const group =
+        new THREE.Group();
+
+
+    group.name =
+        groupData.name ||
+        "group";
+
+    const jointMatch =
+        group.name.match(
+            /^([XYZ]+)-(.+)$/i
+        );
+
+
+    if (
+        jointMatch
+    ) {
+
+        group.userData.allowedAxes =
+            jointMatch[1].toLowerCase();
+
+
+        group.userData.tPoseRotation =
+            group.rotation.clone();
+
+
+        armJoints[group.name] =
+            group;
+    }
+
+
+    const origin =
+        getGroupOrigin(
+            groupData,
+            elements
+        );
+
+
+    group.userData.blockbenchOrigin =
+        new THREE.Vector3(
+            origin[0],
+            origin[1],
+            origin[2]
+        );
+
+
+    /*
+     * IMPORTANT:
+     *
+     * Blockbench group origins are in MODEL/WORLD
+     * coordinates.
+     *
+     * Therefore the group must be positioned
+     * relative to its parent's origin.
+     */
+
+    const parentOrigin =
+        parent.userData.blockbenchOrigin ||
+        new THREE.Vector3(
+            0,
+            0,
+            0
+        );
+
+
+    group.position.set(
+        origin[0] - parentOrigin.x,
+        origin[1] - parentOrigin.y,
+        origin[2] - parentOrigin.z
+    );
+
+
+    parent.add(
+        group
+    );
+
+
+    /*
+     * Process children.
+
+     */
+
+    if (
+        !Array.isArray(
+            groupData.children
+        )
+    ) {
+
+        return group;
+    }
+
+
+    for (
+        const child of groupData.children
+    ) {
+
+        /*
+         * Numeric children reference an
+         * element index.
+         */
+
+        if (
+            typeof child === "number"
+        ) {
+
+            const mesh =
+                meshes[child];
+
+
+            if (!mesh) {
+                continue;
+            }
+
+
+            /*
+             * If the cube has a rotation pivot,
+             * use that instead of the cube directly.
+             */
+
+            const object =
+                mesh.userData.rotationPivot ||
+                mesh;
+
+
+            /*
+             * Mesh coordinates were originally
+             * calculated in model/world space.
+             *
+             * Convert them to the current group's
+             * coordinate space.
+             */
+
+            if (
+                object.userData
+                    ?.isRotationPivot
+            ) {
+
+                const rotationOrigin =
+                    object.userData
+                        .blockbenchOrigin;
+
+
+                object.position.set(
+                    rotationOrigin.x - origin[0],
+                    rotationOrigin.y - origin[1],
+                    rotationOrigin.z - origin[2]
+                );
+
+
+                /*
+                 * The mesh inside the pivot is already
+                 * relative to the rotation origin.
+                 */
+
+            } else {
+
+                mesh.position.sub(
+                    group.userData
+                        .blockbenchOrigin
+                );
+            }
+
+
+            group.add(
+                object
+            );
+
+
+            if (
+                mesh.name.toLowerCase() === "thumb" &&
+                object.userData?.isRotationPivot
+            ) {
+                const side =
+                    group.name.endsWith("R")
+                        ? "R"
+                        : "L";
+
+                thumbJoints[side] =
+                    object;
+            }
+
+
+            continue;
+        }
+
+
+        /*
+         * Object children are nested groups.
+         */
+
+        if (
+            typeof child === "object"
+        ) {
+
+            buildGroup(
+                child,
+                group,
+                meshes,
+                elements
+            );
+        }
+    }
+
+
+    return group;
+}
+
+
+function getGroupOrigin(
+    groupData,
+    elements
+) {
+
+    if (
+        groupData.name === "Y-head"
+    ) {
+        return groupData.origin || [0, 0, 0];
+    }
+
+
+    if (
+        Array.isArray(
+            groupData.children
+        )
+    ) {
+
+        for (
+            const child of groupData.children
+        ) {
+
+            if (
+                typeof child !== "number"
+            ) {
+                continue;
+            }
+
+
+            const rotationOrigin =
+                elements[child]
+                    ?.rotation
+                    ?.origin;
+
+
+            if (
+                Array.isArray(
+                    rotationOrigin
+                )
+            ) {
+                return rotationOrigin;
+            }
+        }
+    }
+
+
+    return groupData.origin || [0, 0, 0];
+}
+
+
+function rotateArmJoint(
+    jointName,
+    axis,
+    angle
+) {
+
+    const joint =
+        armJoints[jointName];
+
+
+    if (!joint) {
+        return;
+    }
+
+
+    if (
+        !joint.userData.allowedAxes?.includes(
+            axis.toLowerCase()
+        )
+    ) {
+        return;
+    }
+
+
+    joint.rotation[axis] =
+        clampJointRotation(angle);
+
+    /*
+     * Keep the other axes inside their limits as well. This makes
+     * rotateArmJoint() a hard safety boundary for every joint,
+     * regardless of how the joint was previously rotated.
+     */
+    clampJoint(joint);
+}
+
+
+function splitScriptArguments(
+    argumentText
+) {
+
+    const argumentsList = [];
+    let current = "";
+    let quote = null;
+    let depth = 0;
+
+
+    for (
+        const character of argumentText
+    ) {
+
+        if (
+            quote
+        ) {
+
+            current += character;
+
+            if (
+                character === quote
+            ) {
+                quote = null;
+            }
+
+            continue;
+        }
+
+
+        if (
+            character === "\"" ||
+            character === "'"
+        ) {
+            quote = character;
+            current += character;
+        } else if (
+            character === "[" ||
+            character === "("
+        ) {
+            depth++;
+            current += character;
+        } else if (
+            character === "]" ||
+            character === ")"
+        ) {
+            depth--;
+            current += character;
+        } else if (
+            character === "," &&
+            depth === 0
+        ) {
+            argumentsList.push(current.trim());
+            current = "";
+        } else {
+            current += character;
+        }
+    }
+
+
+    if (
+        current.trim()
+    ) {
+        argumentsList.push(current.trim());
+    }
+
+
+    return argumentsList;
+}
+
+
+function parseScriptValue(
+    value
+) {
+
+    const trimmedValue =
+        value.trim();
+
+
+    if (
+        (trimmedValue.startsWith("\"") &&
+            trimmedValue.endsWith("\"")) ||
+        (trimmedValue.startsWith("'") &&
+            trimmedValue.endsWith("'"))
+    ) {
+        return trimmedValue.slice(1, -1);
+    }
+
+
+    if (
+        trimmedValue.startsWith("[") &&
+        trimmedValue.endsWith("]")
+    ) {
+        return splitScriptArguments(
+            trimmedValue.slice(1, -1)
+        ).map(
+            parseScriptValue
+        );
+    }
+
+
+    const numberValue =
+        Number(trimmedValue);
+
+
+    return Number.isNaN(numberValue)
+        ? undefined
+        : numberValue;
+}
+
+
+function getScriptArguments(
+    argumentText
+) {
+
+    const values = {};
+    const positional = [];
+
+
+    for (
+        const argument of splitScriptArguments(argumentText)
+    ) {
+
+        const equalsIndex =
+            argument.indexOf("=");
+
+
+        if (
+            equalsIndex > 0
+        ) {
+            values[
+                argument.slice(0, equalsIndex).trim()
+            ] = parseScriptValue(
+                argument.slice(equalsIndex + 1)
+            );
+        } else {
+            positional.push(
+                parseScriptValue(argument)
+            );
+        }
+    }
+
+
+    return {
+        values,
+        positional
+    };
+}
+
+
+function getScriptJointName(
+    partName,
+    axis
+) {
+
+    const normalizedAxis =
+        String(axis || "")
+            .trim()
+            .toUpperCase();
+
+
+    const normalizedPartName =
+        String(partName || "")
+            .trim()
+            .replace(
+                /^[XYZ]+-/i,
+                ""
+            );
+
+
+    const axisSpecificJointName =
+        `${normalizedAxis}-${normalizedPartName}`;
+
+
+    if (
+        armJoints[axisSpecificJointName]
+    ) {
+        return axisSpecificJointName;
+    }
+
+
+    const multiAxisJointName =
+        `XYZ-${normalizedPartName}`;
+
+
+    if (
+        armJoints[multiAxisJointName]
+    ) {
+        return multiAxisJointName;
+    }
+
+
+    const matchingJointName =
+        Object.keys(
+            armJoints
+        ).find(
+            jointName =>
+                jointName.endsWith(
+                    `-${normalizedPartName}`
+                ) &&
+                armJoints[jointName].userData.allowedAxes?.includes(
+                    normalizedAxis.toLowerCase()
+                )
+        );
+
+
+    if (
+        matchingJointName
+    ) {
+        return matchingJointName;
+    }
+
+
+    return axisSpecificJointName;
+}
+
+
+function scheduleRotatePart(
+    partName,
+    axis,
+    degree,
+    duration
+) {
+
+    const numericDegree =
+        Number(degree);
+    const numericDuration =
+        Number(duration ?? 1);
+
+
+    if (
+        !Number.isFinite(numericDegree) ||
+        !Number.isFinite(numericDuration)
+    ) {
+        throw new Error(
+            "rotatePart degree and time must be numbers."
+        );
+    }
+
+    const jointName =
+        getScriptJointName(
+            partName,
+            axis
+        );
+
+    const joint =
+        armJoints[jointName];
+
+
+    if (
+        !joint ||
+        !joint.userData.allowedAxes?.includes(
+            String(axis).toLowerCase()
+        )
+    ) {
+        throw new Error(
+            `Cannot rotate ${partName} on ${axis}.`
+        );
+    }
+
+
+    const normalizedDuration =
+        Math.max(
+            0.01,
+            numericDuration
+        );
+
+
+    scriptedRotations.push({
+        joint,
+        axis: String(axis).toLowerCase(),
+        start: joint.rotation[
+            String(axis).toLowerCase()
+        ],
+        target: clampJointRotation(
+            THREE.MathUtils.degToRad(
+                numericDegree
+            )
+        ),
+        startTime: waveClock.getElapsedTime(),
+        duration: normalizedDuration
+    });
+}
+
+
+function scheduleCyclicMovement(
+    jointName,
+    axis,
+    amplitude,
+    speed,
+    phase,
+    offset = 0
+) {
+
+    const numericValues = [
+        amplitude,
+        speed,
+        phase,
+        offset
+    ].map(
+        Number
+    );
+
+
+    if (
+        numericValues.some(
+            value => !Number.isFinite(value)
+        )
+    ) {
+        throw new Error(
+            "cyclicMovement amplitude, speed, phase, and offset must be numbers."
+        );
+    }
+
+    const joint =
+        armJoints[jointName] ||
+        armJoints[
+            getScriptJointName(
+                jointName,
+                axis
+            )
+        ];
+
+
+    if (
+        !joint ||
+        !joint.userData.allowedAxes?.includes(
+            String(axis).toLowerCase()
+        )
+    ) {
+        throw new Error(
+            `Cannot animate ${jointName} on ${axis}.`
+        );
+    }
+
+
+    scriptedCycles.push({
+        jointName: joint.name,
+        axis: String(axis).toLowerCase(),
+        amplitude: numericValues[0],
+        speed: numericValues[1],
+        phase: numericValues[2],
+        offset: numericValues[3]
+    });
+}
+
+
+function releaseGrabbedObject(
+    side
+) {
+
+    for (
+        const object of grabbableObjects
+    ) {
+
+        if (
+            object.userData.grabbedBy !== side
+        ) {
+            continue;
+        }
+
+
+        scene.attach(
+            object
+        );
+        delete object.userData.grabbedBy;
+    }
+
+
+    handIsHolding[side] = false;
+}
+
+
+function setHandState(
+    open,
+    side
+) {
+
+    resetAnimation = null;
+
+
+    const selectedSides = [];
+    const normalizedSide =
+        String(side || "")
+            .toUpperCase();
+
+
+    if (
+        normalizedSide.includes("L")
+    ) {
+        selectedSides.push("L");
+    }
+
+
+    if (
+        normalizedSide.includes("R")
+    ) {
+        selectedSides.push("R");
+    }
+
+
+    if (
+        selectedSides.length === 0
+    ) {
+        throw new Error(
+            "A hand side containing L or R is required."
+        );
+    }
+
+
+    for (const selectedSide of selectedSides) {
+
+        const thumb =
+            thumbJoints[selectedSide];
+
+
+        if (
+            !thumb
+        ) {
+            continue;
+        }
+
+
+        const tPoseRotation =
+            thumb.userData.tPoseRotation ||
+            new THREE.Euler();
+
+
+        thumb.rotation.copy(
+            tPoseRotation
+        );
+
+
+        if (
+            open
+        ) {
+            releaseGrabbedObject(
+                selectedSide
+            );
+
+            thumb.rotation.z +=
+                THREE.MathUtils.degToRad(
+                    selectedSide === "R"
+                        ? -60
+                        : 60
+                );
+
+            handCanGrab[selectedSide] = true;
+        } else {
+            tryGrabObject(
+                selectedSide
+            );
+
+            handCanGrab[selectedSide] = false;
+        }
+    }
+}
+
+
+function openHand(
+    side
+) {
+    setHandState(
+        true,
+        side
+    );
+}
+
+
+function closeHand(
+    side
+) {
+    setHandState(
+        false,
+        side
+    );
+}
+
+
+function decodeBase64Pcm(
+    base64Audio,
+    sampleRate
+) {
+
+    const binaryAudio =
+        atob(base64Audio);
+
+    const audioBytes =
+        new Uint8Array(
+            binaryAudio.length
+        );
+
+
+    for (
+        let index = 0;
+        index < binaryAudio.length;
+        index++
+    ) {
+        audioBytes[index] =
+            binaryAudio.charCodeAt(index);
+    }
+
+
+    const frameCount =
+        Math.floor(audioBytes.length / 2);
+
+    const audioBuffer =
+        speechAudioContext.createBuffer(
+            1,
+            frameCount,
+            sampleRate
+        );
+
+    const channelData =
+        audioBuffer.getChannelData(0);
+
+    const audioView =
+        new DataView(
+            audioBytes.buffer
+        );
+
+
+    for (
+        let frameIndex = 0;
+        frameIndex < frameCount;
+        frameIndex++
+    ) {
+        channelData[frameIndex] =
+            audioView.getInt16(
+                frameIndex * 2,
+                true
+            ) / 32768;
+    }
+
+
+    return audioBuffer;
+}
+
+
+async function speakText(
+    text,
+    pitch = 0.5,
+    speed = 1
+) {
+
+    const numericPitch =
+        Math.min(
+            1,
+            Math.max(0, Number(pitch))
+        );
+
+    const numericSpeed =
+        Math.min(
+            1,
+            Math.max(0, Number(speed))
+        );
+
+
+    if (
+        !Number.isFinite(numericPitch) ||
+        !Number.isFinite(numericSpeed)
+    ) {
+        throw new Error(
+            "speak pitch and speed must be numbers between 0 and 1."
+        );
+    }
+
+
+    const response =
+        await fetch(
+            `${geminiTtsEndpoint}?key=${geminiApiKey}`,
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    contents: [
+                        {
+                            parts: [
+                                {
+                                    text:
+                                        `Read this text aloud. Use a pitch of ${numericPitch} and a speaking speed of ${numericSpeed}. Text: ${text}`
+                                }
+                            ]
+                        }
+                    ],
+                    generationConfig: {
+                        responseModalities: ["AUDIO"],
+                        speechConfig: {
+                            voiceConfig: {
+                                prebuiltVoiceConfig: {
+                                    voiceName: "Kore"
+                                }
+                            }
+                        }
+                    }
+                })
+            }
+        );
+
+
+    if (!response.ok) {
+        throw new Error(
+            `Gemini TTS request failed (${response.status})`
+        );
+    }
+
+
+    const responseData =
+        await response.json();
+
+    const audioPart =
+        responseData.candidates?.[0]
+            ?.content?.parts?.find(
+                part => part.inlineData
+            )?.inlineData;
+
+
+    if (!audioPart?.data) {
+        throw new Error(
+            "Gemini TTS returned no audio."
+        );
+    }
+
+
+    const sampleRateMatch =
+        audioPart.mimeType?.match(
+            /rate=(\d+)/i
+        );
+
+    const sampleRate =
+        Number(sampleRateMatch?.[1]) || 24000;
+
+
+    if (!speechAudioContext) {
+        speechAudioContext =
+            new (window.AudioContext ||
+                window.webkitAudioContext)();
+    }
+
+
+    await speechAudioContext.resume();
+
+    const audioBuffer =
+        decodeBase64Pcm(
+            audioPart.data,
+            sampleRate
+        );
+
+    const source =
+        speechAudioContext.createBufferSource();
+
+    source.buffer = audioBuffer;
+    source.connect(
+        speechAudioContext.destination
+    );
+
+
+    await new Promise(
+        resolve => {
+            source.addEventListener(
+                "ended",
+                resolve,
+                { once: true }
+            );
+            source.start();
+        }
+    );
+}
+
+
+function startSpeech(
+    text,
+    pitch,
+    speed
+) {
+
+    const speechPromise =
+        speakText(
+            text,
+            pitch,
+            speed
+        ).catch(
+            error => {
+                console.error(error);
+                errorElement.textContent =
+                    "Speech error:\n" +
+                    error.message;
+            }
+        );
+
+
+    activeSpeech.add(
+        speechPromise
+    );
+
+    speechPromise.finally(
+        () => activeSpeech.delete(
+            speechPromise
+        )
+    );
+}
+
+
+function waitForScriptedRotations(
+    waitTime = 1
+) {
+
+    const duration =
+        Number(waitTime);
+
+
+    if (
+        !Number.isFinite(duration) ||
+        duration < 0
+    ) {
+        return Promise.reject(
+            new Error(
+                "wait time must be a non-negative number."
+            )
+        );
+    }
+
+
+    const startTime =
+        waveClock.getElapsedTime();
+
+    return new Promise(
+        resolve => {
+            function checkRotations() {
+
+                const elapsedTime =
+                    waveClock.getElapsedTime() -
+                    startTime;
+
+                if (
+                    scriptedRotations.length === 0 &&
+                    activeSpeech.size === 0 &&
+                    elapsedTime >= duration
+                ) {
+                    resolve();
+                    return;
+                }
+
+
+                requestAnimationFrame(
+                    checkRotations
+                );
+            }
+
+
+            checkRotations();
+        }
+    );
+}
+
+
+function tryGrabObject(
+    side
+) {
+
+    if (
+        !handCanGrab[side] ||
+        handIsHolding[side]
+    ) {
+        return false;
+    }
+
+
+    const hand =
+        armJoints[`XYZ-hand${side}`];
+
+
+    if (
+        !hand
+    ) {
+        return false;
+    }
+
+
+    modelRoot.updateMatrixWorld(
+        true
+    );
+
+
+    const handPosition =
+        new THREE.Vector3();
+
+    hand.getWorldPosition(
+        handPosition
+    );
+
+
+    for (
+        const object of grabbableObjects
+    ) {
+
+        if (
+            !object.userData.canGrab ||
+            object.userData.grabbedBy
+        ) {
+            continue;
+        }
+
+
+        const objectBounds =
+            new THREE.Box3()
+                .setFromObject(object);
+        const objectPosition =
+            objectBounds.getCenter(
+                new THREE.Vector3()
+            );
+        const grabDistance =
+            handPosition.distanceTo(
+                objectPosition
+            );
+
+
+        if (
+            grabDistance > 10
+        ) {
+            continue;
+        }
+
+
+        hand.attach(
+            object
+        );
+        object.userData.grabbedBy =
+            side;
+        handIsHolding[side] = true;
+        return true;
+    }
+
+
+    return false;
+}
+
+
+async function runPythonSource(
+    source
+) {
+
+    resetAnimation = null;
+
+    const calls =
+        source
+            .replace(/#.*$/gm, "")
+            .matchAll(
+                /\b(rotatePart|cyclicMovement|reset|openHand|closeHand|wait|speak)\s*\(([\s\S]*?)\)/g
+            );
+
+    let callCount = 0;
+
+
+    for (
+        const match of calls
+    ) {
+
+        const [, functionName, argumentText] = match;
+        const callStart = match.index || 0;
+        const lineStart =
+            source.lastIndexOf("\n", callStart) + 1;
+
+
+        if (
+            /^\s*def\s+/.test(
+                source.slice(
+                    lineStart,
+                    callStart
+                )
+            )
+        ) {
+            continue;
+        }
+
+
+        codeInspectorContent.value =
+            source.slice(
+                0,
+                callStart + match[0].length
+            );
+        codeInspectorContent.scrollTop =
+            codeInspectorContent.scrollHeight;
+
+        const parsedArguments =
+            getScriptArguments(argumentText);
+
+
+        if (
+            functionName === "rotatePart"
+        ) {
+            const [partName, axis, degree, positionalTime] =
+                parsedArguments.positional;
+
+            scheduleRotatePart(
+                partName,
+                axis,
+                degree,
+                parsedArguments.values.time ?? positionalTime
+            );
+        } else if (
+            functionName === "cyclicMovement"
+        ) {
+            const [jointName, axis, amplitude, speed, phase, positionalOffset] =
+                parsedArguments.positional;
+
+            scheduleCyclicMovement(
+                jointName,
+                axis,
+                amplitude,
+                speed,
+                phase,
+                parsedArguments.values.offset ?? positionalOffset
+            );
+        } else if (
+            functionName === "reset"
+        ) {
+            startResetAnimation();
+        } else if (
+            functionName === "openHand"
+        ) {
+            openHand(
+                parsedArguments.positional[0]
+            );
+        } else if (
+            functionName === "closeHand"
+        ) {
+            closeHand(
+                parsedArguments.positional[0]
+            );
+        } else if (
+            functionName === "wait"
+        ) {
+            await waitForScriptedRotations(
+                parsedArguments.values.time ??
+                    parsedArguments.positional[0]
+            );
+        } else if (
+            functionName === "speak"
+        ) {
+            startSpeech(
+                parsedArguments.positional[0],
+                parsedArguments.values.pitch ??
+                    parsedArguments.positional[1],
+                parsedArguments.values.speed ??
+                    parsedArguments.positional[2]
+            );
+        }
+
+
+        callCount++;
+    }
+
+
+    if (
+        callCount === 0
+    ) {
+        throw new Error(
+            "No supported animation or speech calls found."
+        );
+    }
+
+
+    return callCount;
+}
+
+
+function animateScriptedMovements(
+    time
+) {
+
+    for (
+        let index = scriptedRotations.length - 1;
+        index >= 0;
+        index--
+    ) {
+
+        const movement =
+            scriptedRotations[index];
+
+        const progress =
+            Math.min(
+                1,
+                (time - movement.startTime) /
+                    movement.duration
+            );
+
+
+        movement.joint.rotation[
+            movement.axis
+        ] = clampJointRotation(
+            THREE.MathUtils.lerp(
+                movement.start,
+                movement.target,
+                progress
+            )
+        );
+
+        clampJoint(
+            movement.joint
+        );
+
+
+        if (
+            progress >= 1
+        ) {
+            scriptedRotations.splice(index, 1);
+        }
+    }
+
+
+    for (
+        const movement of scriptedCycles
+    ) {
+        rotateArmJoint(
+            movement.jointName,
+            movement.axis,
+            movement.offset +
+                Math.sin(
+                    time * movement.speed +
+                    movement.phase
+                ) * movement.amplitude
+        );
+    }
+}
+
+// region Animation
+
+function animateWave(
+    time,
+    side
+) {
+
+    const waveJoints = [
+        [`X-Shoulder${side}`, "x", 0.12, 2.4, 0],
+        [`YZ-upperArm${side}`, "y", -0.22, 2.4, 0.55, 0.05],
+        [`Z-forearm${side}`, "z", -0.5, 4.8, 0.5],
+        [`XYZ-hand${side}`, "z", -0.5, 4.8, 0.5]
+    ];
+
+
+    for (
+        const [jointName, axis, amplitude, speed, phase, offset = 0]
+        of waveJoints
+    ) {
+
+        rotateArmJoint(
+            jointName,
+            axis,
+            offset +
+            Math.sin(time * speed + phase) * amplitude
+        );
+    }
+}
+
+
+function startResetAnimation() {
+
+    lWaveAnimationEnabled = false;
+    rWaveAnimationEnabled = false;
+    scriptedRotations.length = 0;
+    scriptedCycles.length = 0;
+    handCanGrab.L = false;
+    handCanGrab.R = false;
+
+
+    const joints =
+        Object.values(
+            armJoints
+        ).map(
+            joint => ({
+                joint,
+                start: joint.rotation.clone(),
+                target: joint.userData.tPoseRotation.clone()
+            })
+        );
+
+
+    for (
+        const side of ["L", "R"]
+    ) {
+        if (
+            handIsHolding[side]
+        ) {
+            continue;
+        }
+
+        const thumb = thumbJoints[side];
+
+        if (thumb) {
+            joints.push({
+                joint: thumb,
+                start: thumb.rotation.clone(),
+                target: thumb.userData.tPoseRotation.clone()
+            });
+        }
+    }
+
+
+    resetAnimation = {
+        startTime: waveClock.getElapsedTime(),
+        duration: 0.8,
+        joints
+    };
+}
+
+
+function fullResetScene() {
+
+    resetAnimation = null;
+    lWaveAnimationEnabled = false;
+    rWaveAnimationEnabled = false;
+    scriptedRotations.length = 0;
+    scriptedCycles.length = 0;
+
+
+    for (
+        const side of ["L", "R"]
+    ) {
+        handCanGrab[side] = false;
+        handIsHolding[side] = false;
+    }
+
+
+    rebuildModel();
+}
+
+
+function animateReset(
+    time
+) {
+
+    const progress =
+        Math.min(
+            1,
+            (time - resetAnimation.startTime) /
+                resetAnimation.duration
+        );
+
+
+    const easedProgress =
+        progress *
+        progress *
+        (3 - 2 * progress);
+
+
+    for (
+        const entry of resetAnimation.joints
+    ) {
+
+        entry.joint.rotation.x =
+            THREE.MathUtils.lerp(
+                entry.start.x,
+                entry.target.x,
+                easedProgress
+            );
+
+        entry.joint.rotation.y =
+            THREE.MathUtils.lerp(
+                entry.start.y,
+                entry.target.y,
+                easedProgress
+            );
+
+        entry.joint.rotation.z =
+            THREE.MathUtils.lerp(
+                entry.start.z,
+                entry.target.z,
+                easedProgress
+            );
+
+        clampJoint(
+            entry.joint
+        );
+    }
+
+
+    if (
+        progress >= 1
+    ) {
+        resetAnimation = null;
+    }
+}
+
+
+/* ============================================================
+ *
+ * FRAME MODEL
+ *
+ * ============================================================ */
+
+
+function frameModel() {
+
+    const box =
+        new THREE.Box3()
+            .setFromObject(
+                modelRoot
+            );
+
+
+    if (
+        box.isEmpty()
+    ) {
+
+        return;
+    }
+
+
+    const center =
+        box.getCenter(
+            new THREE.Vector3()
+        );
+
+
+    const size =
+        box.getSize(
+            new THREE.Vector3()
+        );
+
+
+    /*
+     * Move the model's visual center
+     * to the origin.
+     */
+
+    modelRoot.position.sub(
+        center
+    );
+
+
+    modelRoot.rotation.y =
+        0;
+
+
+    const largestDimension =
+        Math.max(
+            size.x,
+            size.y,
+            size.z
+        );
+
+
+    if (
+        largestDimension <= 0
+    ) {
+
+        return;
+    }
+
+
+    /*
+     * Make the model approximately 10 units
+     * across.
+
+     */
+
+    const targetSize = 20;
+
+
+    modelRoot.scale.setScalar(
+        targetSize /
+        largestDimension
+    );
+
+
+    /*
+     * Reset camera.
+
+     */
+
+    modelRoot.updateMatrixWorld(
+        true
+    );
+
+
+    const framedBox =
+        new THREE.Box3()
+            .setFromObject(
+                modelRoot
+            );
+
+
+    const framedCenter =
+        framedBox.getCenter(
+            new THREE.Vector3()
+        );
+
+
+    const framedSize =
+        framedBox.getSize(
+            new THREE.Vector3()
+        );
+
+
+    const framedDimension =
+        Math.max(
+            framedSize.x,
+            framedSize.y,
+            framedSize.z
+        );
+
+
+    const viewDistance =
+        framedDimension /
+        (2 * Math.tan(
+            THREE.MathUtils.degToRad(
+                camera.fov
+            ) / 2
+        )) *
+        0.95;
+
+
+    camera.position.copy(
+        framedCenter
+    );
+
+
+    camera.position.add(
+        new THREE.Vector3(
+            1,
+            0.75,
+            1
+        ).normalize().multiplyScalar(
+            viewDistance
+        )
+    );
+
+
+    camera.lookAt(
+        framedCenter
+    );
+
+
+    controls.target.copy(
+        framedCenter
+    );
+
+
+    controls.update();
+}
+
+
+/* ============================================================
+ *
+ * COUNT GROUPS
+ *
+ * ============================================================ */
+
+
+function countGroups(
+    groups
+) {
+
+    let count = 0;
+
+
+    function countFunc(
+        group
+    ) {
+
+        count++;
+
+
+        if (
+            !group.children
+        ) {
+            return;
+        }
+
+
+        for (
+            const child of group.children
+        ) {
+
+            if (
+                typeof child === "object" &&
+                !Array.isArray(child)
+            ) {
+
+                /*
+                 * Only count actual group objects
+                 * from the JSON structure.
+                 */
+
+                if (
+                    child.name &&
+                    Array.isArray(
+                        child.children
+                    )
+                ) {
+
+                    countFunc(
+                        child
+                    );
+                }
+            }
+        }
+    }
+
+
+    for (
+        const group of groups
+    ) {
+
+        countFunc(
+            group
+        );
+    }
+
+
+    return count;
+}
+
+function getGroupNames(groups) {
+    return groups.flatMap(group => [
+        group.name || "Unnamed group",
+        ...getGroupNames(
+            (group.children || []).filter(
+                child => typeof child === "object"
+            )
+        )
+    ]);
+}
+
+
+/* ============================================================
+ *
+ * RESIZE
+ *
+ * ============================================================ */
+
+
+window.addEventListener(
+    "resize",
+    () => {
+
+        camera.aspect =
+            window.innerWidth /
+            window.innerHeight;
+
+
+        camera.updateProjectionMatrix();
+
+
+        renderer.setSize(
+            window.innerWidth,
+            window.innerHeight
+        );
+
+
+        positionCodeInspector();
+    }
+);
+
+
+window.addEventListener(
+    "pointermove",
+    event => {
+
+        const shouldLookRight =
+            event.clientX >
+            window.innerWidth / 2;
+
+
+        if (
+            shouldLookRight === eyesLookingRight
+        ) {
+            return;
+        }
+
+
+        eyesLookingRight =
+            shouldLookRight;
+
+
+        setEyeGaze(
+            eyesLookingRight
+        );
+    }
+);
+
+
+/* ============================================================
+ *
+ * RENDER LOOP
+ *
+ * ============================================================ */
+
+
+function animate() {
+
+    requestAnimationFrame(
+        animate
+    );
+
+
+    const time =
+        waveClock.getElapsedTime();
+
+
+    if (resetAnimation) {
+
+        animateReset(
+            time
+        );
+
+    } else {
+
+        animateScriptedMovements(
+            time
+        );
+
+        if (lWaveAnimationEnabled) {
+
+            animateWave(
+                time,
+                "L"
+            );
+        }
+
+        if (rWaveAnimationEnabled) {
+
+            animateWave(
+                time,
+                "R"
+            );
+        }
+    }
+
+    /*
+     * Hard safety pass: every registered joint is guaranteed to
+     * remain within -90° .. +90° on all three axes, regardless of
+     * which animation or command changed it.
+     */
+    for (const joint of Object.values(armJoints)) {
+        clampJoint(joint);
+    }
+
+    for (const joint of Object.values(thumbJoints)) {
+        clampJoint(joint);
+    }
+
+
+    controls.update();
+
+
+    for (
+        const line of groupHighlightLines
+    ) {
+
+        const sourceMesh =
+            line.userData.sourceMesh;
+
+
+        if (
+            sourceMesh
+        ) {
+            sourceMesh.updateWorldMatrix(
+                true,
+                false
+            );
+            line.matrix.copy(
+                sourceMesh.matrixWorld
+            );
+            line.matrixWorldNeedsUpdate =
+                true;
+        }
+    }
+
+
+    cameraInfo.textContent =
+        "Camera: " +
+        camera.position.x.toFixed(2) +
+        ", " +
+        camera.position.y.toFixed(2) +
+        ", " +
+        camera.position.z.toFixed(2);
+
+
+    renderer.render(
+        scene,
+        camera
+    );
+}
+
+function printPartList(targetElement, list) {
+    list.forEach(
+        groupName => {
+            const listItem =
+                document.createElement("p");
+
+            listItem.textContent =
+                `> ${groupName}`;
+            listItem.addEventListener(
+                "mouseenter",
+                () => showGroupHighlight(groupName)
+            );
+            listItem.addEventListener(
+                "mouseleave",
+                clearGroupHighlight
+            );
+            targetElement.appendChild(
+                listItem
+            );
+        }
+    );
+}
+
+function printList(targetElement, list) {
+    list.forEach(
+        elem => {
+            const listItem = document.createElement("p");
+            listItem.innerHTML = `> ${elem}`;
+            targetElement.appendChild(
+                listItem
+            );
+        }
+    );
+}
+
+function clearGroupHighlight() {
+
+    while (
+        groupHighlightLines.length > 0
+    ) {
+        const line =
+            groupHighlightLines.pop();
+
+        line.parent?.remove(
+            line
+        );
+        line.geometry.dispose();
+    }
+}
+
+
+function showGroupHighlight(
+    groupName
+) {
+
+    clearGroupHighlight();
+
+
+    const group =
+        armJoints[groupName];
+
+
+    if (
+        !group
+    ) {
+        return;
+    }
+
+
+    const groupMeshes = [];
+
+
+    group.traverse(
+        child => {
+
+            if (
+                child.isMesh
+            ) {
+                groupMeshes.push(
+                    child
+                );
+            }
+        }
+    );
+
+
+    for (
+        const mesh of groupMeshes
+    ) {
+        const line =
+            new THREE.LineSegments(
+                new THREE.EdgesGeometry(
+                    mesh.geometry
+                ),
+                groupHighlightMaterial
+            );
+
+        line.renderOrder = 10000;
+        line.frustumCulled = false;
+        line.matrixAutoUpdate = false;
+        line.userData.sourceMesh = mesh;
+        mesh.updateWorldMatrix(
+            true,
+            false
+        );
+        line.matrix.copy(
+            mesh.matrixWorld
+        );
+        scene.add(
+            line
+        );
+        groupHighlightLines.push(
+            line
+        );
+    }
+}
+
+pythonFileInput.addEventListener("change", async () => {
+    const [file] = pythonFileInput.files;
+
+    if (!file) {
+        return;
+    }
+
+    if (!file.name.toLowerCase().endsWith(".py")) {
+        errorElement.textContent = "SCRIPT LOAD requires a Python (.py) file.";
+        pythonFileInput.value = "";
+        return;
+    }
+
+    try {
+        const source = await file.text();
+
+        loadedPythonFiles.set(
+            file.name,
+            {
+                file,
+                source
+            }
+        );
+        inspectedPythonFile = file.name;
+
+        consoleOutput.textContent =
+            `Loaded ${file.name} (${source.length} characters).`;
+        errorElement.textContent = "";
+    } catch (error) {
+        errorElement.textContent =
+            "Could not read the Python file:\n" +
+            error.message;
+    }
+
+    pythonFileInput.value = "";
+});
+
+
+async function loadDefaultPythonFile() {
+
+    try {
+        let source;
+
+
+        if (
+            window.location.protocol === "file:"
+        ) {
+            source = await new Promise(
+                (resolve, reject) => {
+                    const request =
+                        new XMLHttpRequest();
+
+                    request.open(
+                        "GET",
+                        "test.py",
+                        true
+                    );
+
+                    request.onload =
+                        () => {
+                            if (
+                                request.status === 0 ||
+                                (request.status >= 200 &&
+                                    request.status < 300)
+                            ) {
+                                resolve(
+                                    request.responseText
+                                );
+                            } else {
+                                reject(
+                                    new Error(
+                                        `Could not load test.py (${request.status})`
+                                    )
+                                );
+                            }
+                        };
+
+                    request.onerror =
+                        () => reject(
+                            new Error(
+                                "Could not load test.py"
+                            )
+                        );
+
+                    request.send();
+                }
+            );
+        } else {
+            const response =
+                await fetch("test.py");
+
+
+            if (
+                !response.ok
+            ) {
+                throw new Error(
+                    `Could not load test.py (${response.status})`
+                );
+            }
+
+
+            source =
+                await response.text();
+        }
+
+
+        loadedPythonFiles.set(
+            "test.py",
+            {
+                file: null,
+                source
+            }
+        );
+        inspectedPythonFile = "test.py";
+    } catch (error) {
+        errorElement.textContent =
+            "Could not load default test.py:\n" +
+            error.message;
+    }
+}
+
+
+loadDefaultPythonFile();
+
+
+function downloadFile(
+    blob,
+    fileName
+) {
+
+    const link =
+        document.createElement("a");
+
+    link.href =
+        URL.createObjectURL(blob);
+    link.download = fileName;
+    link.click();
+    URL.revokeObjectURL(link.href);
+}
+
+
+function getCrc32(
+    bytes
+) {
+
+    let crc = 0xffffffff;
+
+
+    for (
+        const byte of bytes
+    ) {
+        crc ^= byte;
+
+        for (
+            let bit = 0;
+            bit < 8;
+            bit++
+        ) {
+            crc =
+                (crc >>> 1) ^
+                (crc & 1
+                    ? 0xedb88320
+                    : 0);
+        }
+    }
+
+
+    return (
+        crc ^ 0xffffffff
+    ) >>> 0;
+}
+
+
+function writeZipNumber(
+    view,
+    offset,
+    value,
+    byteLength
+) {
+
+    if (
+        byteLength === 2
+    ) {
+        view.setUint16(
+            offset,
+            value,
+            true
+        );
+    } else {
+        view.setUint32(
+            offset,
+            value,
+            true
+        );
+    }
+}
+
+
+function createPythonZip(
+    files
+) {
+
+    const encoder =
+        new TextEncoder();
+    const chunks = [];
+    const centralDirectory = [];
+    let offset = 0;
+
+
+    for (
+        const [fileName, source] of files
+    ) {
+        const nameBytes =
+            encoder.encode(fileName);
+        const sourceBytes =
+            encoder.encode(source);
+        const header =
+            new Uint8Array(30 + nameBytes.length);
+        const headerView =
+            new DataView(header.buffer);
+
+        writeZipNumber(headerView, 0, 0x04034b50, 4);
+        writeZipNumber(headerView, 4, 20, 2);
+        writeZipNumber(headerView, 6, 0x800, 2);
+        writeZipNumber(headerView, 8, 0, 2);
+        writeZipNumber(headerView, 14, getCrc32(sourceBytes), 4);
+        writeZipNumber(headerView, 18, sourceBytes.length, 4);
+        writeZipNumber(headerView, 22, sourceBytes.length, 4);
+        writeZipNumber(headerView, 26, nameBytes.length, 2);
+        header.set(nameBytes, 30);
+
+        chunks.push(header, sourceBytes);
+
+        const centralEntry =
+            new Uint8Array(46 + nameBytes.length);
+        const centralView =
+            new DataView(centralEntry.buffer);
+
+        writeZipNumber(centralView, 0, 0x02014b50, 4);
+        writeZipNumber(centralView, 4, 20, 2);
+        writeZipNumber(centralView, 6, 20, 2);
+        writeZipNumber(centralView, 8, 0x800, 2);
+        writeZipNumber(centralView, 10, 0, 2);
+        writeZipNumber(centralView, 16, getCrc32(sourceBytes), 4);
+        writeZipNumber(centralView, 20, sourceBytes.length, 4);
+        writeZipNumber(centralView, 24, sourceBytes.length, 4);
+        writeZipNumber(centralView, 28, nameBytes.length, 2);
+        writeZipNumber(centralView, 42, offset, 4);
+        centralEntry.set(nameBytes, 46);
+        centralDirectory.push(centralEntry);
+
+        offset += header.length + sourceBytes.length;
+    }
+
+
+    const centralDirectoryOffset = offset;
+    const centralDirectorySize =
+        centralDirectory.reduce(
+            (size, entry) => size + entry.length,
+            0
+        );
+    const endRecord =
+        new Uint8Array(22);
+    const endView =
+        new DataView(endRecord.buffer);
+
+    writeZipNumber(endView, 0, 0x06054b50, 4);
+    writeZipNumber(endView, 8, files.length, 2);
+    writeZipNumber(endView, 10, files.length, 2);
+    writeZipNumber(endView, 12, centralDirectorySize, 4);
+    writeZipNumber(endView, 16, centralDirectoryOffset, 4);
+
+    return new Blob(
+        [...chunks, ...centralDirectory, endRecord],
+        { type: "application/zip" }
+    );
+}
+
+
+function savePythonFiles() {
+
+    const files =
+        [...loadedPythonFiles.entries()].map(
+            ([fileName, storedFile]) => [
+                fileName,
+                storedFile.source
+            ]
+        );
+
+
+    if (
+        files.length === 0
+    ) {
+        errorElement.textContent =
+            "No Python files loaded.";
+        return;
+    }
+
+
+    downloadFile(
+        createPythonZip(files),
+        "python-scripts.zip"
+    );
+    consoleOutput.textContent =
+        `Saved ${files.length} Python file(s) as python-scripts.zip.`;
+}
+
+
+function saveCurrentPythonFile() {
+
+    const fileName =
+        inspectedPythonFile;
+    const storedFile =
+        fileName && loadedPythonFiles.get(fileName);
+
+
+    if (
+        !storedFile
+    ) {
+        errorElement.textContent =
+            "No Python file is currently in use.";
+        return;
+    }
+
+
+    downloadFile(
+        new Blob(
+            [storedFile.source],
+            { type: "text/x-python" }
+        ),
+        fileName.toLowerCase().endsWith(".py")
+            ? fileName
+            : `${fileName}.py`
+    );
+    consoleOutput.textContent =
+        `Saved ${fileName}.`;
+}
+
+
+function createNewPythonFile(
+    requestedName
+) {
+
+    let fileName =
+        requestedName.trim() ||
+        "script.py";
+
+
+    if (
+        !fileName.toLowerCase().endsWith(".py")
+    ) {
+        fileName += ".py";
+    }
+
+
+    const fileStem =
+        fileName.slice(
+            0,
+            -3
+        );
+    let fileNumber = 2;
+
+
+    while (
+        loadedPythonFiles.has(fileName)
+    ) {
+        fileName =
+            `${fileStem}_${fileNumber}.py`;
+        fileNumber++;
+    }
+
+
+    loadedPythonFiles.set(
+        fileName,
+        {
+            file: null,
+            source: ""
+        }
+    );
+
+
+    inspectedPythonFile = fileName;
+    codeInspectorTitle.textContent =
+        `New Python file: ${fileName}`;
+    codeInspectorContent.value = "";
+    codeInspectorContent.readOnly = false;
+    pushCodeModification.disabled = false;
+    consoleOutput.textContent =
+        `Created ${fileName}.`;
+}
+
+
+pushCodeModification.addEventListener(
+    "click",
+    () => {
+        if (
+            executingPythonFile ||
+            !inspectedPythonFile
+        ) {
+            return;
+        }
+
+
+        const storedFile =
+            loadedPythonFiles.get(
+                inspectedPythonFile
+            );
+
+
+        if (!storedFile) {
+            return;
+        }
+
+
+        storedFile.source =
+            codeInspectorContent.value;
+        consoleOutput.textContent =
+            `Updated ${inspectedPythonFile}.`;
+    }
+);
+
+function executeConsoleCommand() {
+    const commandText = consoleInput.value.trim();
+
+
+    if (!commandText) {
+        return;
+    }
+
+
+    commandHistory.push(commandText);
+    commandHistoryIndex = -1;
+    commandHistoryDraft = "";
+    consoleOutput.innerHTML = "";
+    errorElement.innerHTML = ""
+    let command = commandText.split(" ");
+    switch (command[0].toUpperCase()) {
+        case "SCRIPT": {
+            const scriptCommand =
+                command[1]?.toUpperCase();
+
+            if (
+                scriptCommand === "LOAD"
+            ) {
+                pythonFileInput.click();
+            } else if (
+                scriptCommand === "SAVE"
+            ) {
+                savePythonFiles();
+            } else if (
+                scriptCommand === "SAVETHIS"
+            ) {
+                saveCurrentPythonFile();
+            } else if (
+                scriptCommand === "NEW"
+            ) {
+                createNewPythonFile(
+                    command.slice(2).join(" ")
+                );
+            } else {
+                errorElement.textContent =
+                    "SCRIPT requires LOAD, SAVE, SAVETHIS, or NEW.";
+            }
+            break;
+        }
+        case "RUN": {
+            if (!command[1]) {
+                consoleOutput.textContent =
+                    [...loadedPythonFiles.keys()].join("\n") ||
+                    "No Python files loaded.";
+                break;
+            }
+
+            const fileName =
+                command.slice(1).join(" ");
+            const storedFile =
+                loadedPythonFiles.get(fileName);
+
+
+            if (!storedFile) {
+                errorElement.textContent =
+                    `Python file not loaded: ${fileName}`;
+                break;
+            }
+
+
+            if (
+                executingPythonFile
+            ) {
+                errorElement.textContent =
+                    `Already running ${executingPythonFile}.`;
+                break;
+            }
+
+
+            codeInspectorTitle.textContent =
+                `Latest Python file: ${fileName}`;
+            codeInspectorContent.value = "";
+            codeInspectorContent.readOnly = true;
+            pushCodeModification.disabled = true;
+            executingPythonFile = fileName;
+            inspectedPythonFile = fileName;
+
+
+            runPythonSource(
+                storedFile.source
+            ).then(
+                callCount => {
+                    codeInspectorContent.value =
+                        storedFile.source;
+                    codeInspectorContent.readOnly = false;
+                    pushCodeModification.disabled = false;
+                    executingPythonFile = null;
+                    consoleOutput.textContent =
+                        `Running ${fileName} (${callCount} movement calls).`;
+                }
+            ).catch(
+                error => {
+                    codeInspectorContent.value =
+                        storedFile.source;
+                    codeInspectorContent.readOnly = false;
+                    pushCodeModification.disabled = false;
+                    executingPythonFile = null;
+                    errorElement.textContent =
+                        `Could not run ${fileName}:\n` +
+                        error.message;
+                }
+            );
+            break;
+        }
+        case "SETHAND": {
+            const handSide =
+                command[1]?.toUpperCase();
+            const handCommand =
+                command[2]?.toUpperCase();
+
+            if (
+                (handCommand === "OPEN" ||
+                    handCommand === "CLOSE") &&
+                (handSide?.includes("L") ||
+                    handSide?.includes("R"))
+            ) {
+                if (handCommand === "OPEN") {
+                    openHand(handSide);
+                } else {
+                    closeHand(handSide);
+                }
+            } else {
+                errorElement.textContent =
+                    "SETHAND requires a side and OPEN or CLOSE.";
+            }
+            break;
+        }
+        case "DEBUG": {
+            if (command[1]?.toUpperCase() == "SHOW") {
+                modelInfo.hidden = false;
+                cameraInfo.hidden = false;
+            } else if (command[1]?.toUpperCase() == "HIDE") {
+                modelInfo.hidden = true;
+                cameraInfo.hidden = true;  
+            }
+            break;
+        }
+        case "WAVE": {
+            if (command[1]?.toUpperCase() == "R") {
+                resetAnimation = null;
+                rWaveAnimationEnabled = true;
+            } else if (command[1]?.toUpperCase() == "L") {
+                resetAnimation = null;
+                lWaveAnimationEnabled = true;
+            }
+            break;
+        }
+        case "LIST": {
+            let groupList = getGroupNames(modelData.groups || []);
+            consoleOutput.innerHTML = "Axis of rotation - Part name";
+            printPartList(consoleOutput, groupList);
+            break;
+        }
+        case "RESET": {
+            startResetAnimation();
+            break;
+        }
+        case "FRESET": {
+            fullResetScene();
+            break;
+        }
+        case "HELP": {
+            const manual = [
+                "DEBUG [SHOW/HIDE] - Shows/Hides debug info",
+                "LIST - Lists all parts of the robot that can be moved",
+                "RESET - Resets every part of the robot",
+                "FRESET - Resets every part of the scene",
+                "WAVE [L/R] - Waves the robot's Left/Right hand",
+                "SETHAND [L/R/LR] [OPEN/CLOSE]- Sets the robot's Left/Right/Both hand(s) open/closed.",
+                "SCRIPT LOAD - Loads python script from file manager",
+                "SCRIPT NEW [name] - Creates new script that can be edited in the inspector",
+                "SCRIPT SAVE - Saves all scripts into a .zip file",
+                "SCRIPT SAVETHIS - Saves the currently opened script as a .py file",
+                "RUN - Lists all loaded scripts ready for execution",
+                "RUN [script name] - Runs the given script. \"test.py\" is included in the app by default.",
+                "PYHELP - Instructions to how the script of the website works."
+            ]
+            printList(consoleOutput, manual)
+            break;
+        }
+        default: {
+            errorElement.innerHTML = "Type HELP for the full list of commands."
+            break;
+        }
+    }
+    consoleInput.value = "";
+}
+
+
+consoleExecute.addEventListener(
+    "click",
+    executeConsoleCommand
+);
+
+
+consoleInput.addEventListener(
+    "keydown",
+    event => {
+        if (
+            event.key === "Enter"
+        ) {
+            event.preventDefault();
+            executeConsoleCommand();
+            return;
+        }
+
+
+        if (
+            event.key === "ArrowUp"
+        ) {
+            event.preventDefault();
+
+            if (
+                commandHistory.length === 0
+            ) {
+                return;
+            }
+
+
+            if (
+                commandHistoryIndex === -1
+            ) {
+                commandHistoryDraft = consoleInput.value;
+            }
+
+
+            commandHistoryIndex = Math.min(
+                commandHistoryIndex + 1,
+                commandHistory.length - 1
+            );
+            consoleInput.value =
+                commandHistory[
+                    commandHistory.length -
+                    1 -
+                    commandHistoryIndex
+                ];
+        } else if (
+            event.key === "ArrowDown"
+        ) {
+            event.preventDefault();
+
+            if (
+                commandHistoryIndex === -1
+            ) {
+                return;
+            }
+
+
+            commandHistoryIndex--;
+
+            if (
+                commandHistoryIndex === -1
+            ) {
+                consoleInput.value = commandHistoryDraft;
+            } else {
+                consoleInput.value =
+                    commandHistory[
+                        commandHistory.length -
+                        1 -
+                        commandHistoryIndex
+                    ];
+            }
+        }
+    }
+);
+
+animate();
