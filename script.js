@@ -39,6 +39,8 @@ let daggerObject = null;
 let daggerTexture1 = null;
 let daggerTexture2 = null;
 let modelRoot = new THREE.Group();
+let pythonExecutionId = 0;
+let scriptVariables = {};
 const armJoints = {};
 const thumbJoints = {};
 const grabbableObjects = [];
@@ -1919,24 +1921,26 @@ function splitScriptArguments(
 }
 
 
-function parseScriptValue(
-    value
-) {
-
+function parseScriptValue(value) {
     const trimmedValue =
         value.trim();
 
-
+    /*
+     * String literal
+     */
     if (
-        (trimmedValue.startsWith("\"") &&
-            trimmedValue.endsWith("\"")) ||
+        (trimmedValue.startsWith('"') &&
+            trimmedValue.endsWith('"')) ||
+
         (trimmedValue.startsWith("'") &&
             trimmedValue.endsWith("'"))
     ) {
         return trimmedValue.slice(1, -1);
     }
 
-
+    /*
+     * Array
+     */
     if (
         trimmedValue.startsWith("[") &&
         trimmedValue.endsWith("]")
@@ -1948,14 +1952,48 @@ function parseScriptValue(
         );
     }
 
+    /*
+     * Boolean
+     */
+    if (trimmedValue === "true") {
+        return true;
+    }
 
+    if (trimmedValue === "false") {
+        return false;
+    }
+
+    /*
+     * Number
+     */
     const numberValue =
         Number(trimmedValue);
 
+    if (!Number.isNaN(numberValue)) {
+        return numberValue;
+    }
 
-    return Number.isNaN(numberValue)
-        ? undefined
-        : numberValue;
+    /*
+     * Variable
+     *
+     * Only treat valid identifiers as variable names.
+     * This prevents arbitrary text from being passed
+     * to callVariable().
+     */
+    if (
+        /^[A-Za-z_][A-Za-z0-9_]*$/.test(
+            trimmedValue
+        )
+    ) {
+        return callVariable(
+            trimmedValue
+        );
+    }
+
+    /*
+     * Unknown value
+     */
+    return undefined;
 }
 
 
@@ -2064,6 +2102,418 @@ function getScriptJointName(
     return axisSpecificJointName;
 }
 
+function defineVariable(varName, varType, value = undefined) {
+    varName = String(varName).trim();
+    varType = String(varType).trim().toLowerCase();
+
+    if (!varName) {
+        throw new Error("define(): variable name cannot be empty.");
+    }
+
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(varName)) {
+        throw new Error(
+            `define(): invalid variable name "${varName}".`
+        );
+    }
+
+    if (!["text", "num", "logic"].includes(varType)) {
+        throw new Error(
+            `define(): invalid variable type "${varType}". ` +
+            `Expected "text", "num", or "logic".`
+        );
+    }
+
+    // Default values
+    if (value === undefined) {
+        if (varType === "text") value = "-";
+        if (varType === "num") value = 0;
+        if (varType === "logic") value = false;
+    }
+
+    // Convert / validate the initial value
+    if (varType === "text") {
+        value = String(value);
+    }
+
+    else if (varType === "num") {
+        value = Number(value);
+
+        if (!Number.isFinite(value)) {
+            throw new Error(
+                `define(): "${varName}" requires a numeric value.`
+            );
+        }
+    }
+
+    else if (varType === "logic") {
+        if (typeof value === "string") {
+            const lower = value.toLowerCase();
+
+            if (lower === "true") {
+                value = true;
+            }
+            else if (lower === "false") {
+                value = false;
+            }
+            else {
+                throw new Error(
+                    `define(): "${varName}" requires true or false.`
+                );
+            }
+        }
+
+        if (typeof value !== "boolean") {
+            throw new Error(
+                `define(): "${varName}" requires a logical value.`
+            );
+        }
+    }
+
+    const key = `${varName};${varType}`;
+
+    scriptVariables[key] = value;
+
+    return value;
+}
+
+
+function callVariable(varName) {
+    varName = String(varName).trim();
+
+    for (const key of Object.keys(scriptVariables)) {
+        const [storedName] = key.split(";");
+
+        if (storedName === varName) {
+            return scriptVariables[key];
+        }
+    }
+
+    throw new Error(
+        `call(): variable "${varName}" does not exist.`
+    );
+}
+
+function evaluateScriptExpression(expression) {
+    expression = String(expression).trim();
+
+    if (!expression) {
+        throw new Error("change(): expression cannot be empty.");
+    }
+
+    /*
+     * ---------------------------------------------------------
+     * Quoted string
+     * ---------------------------------------------------------
+     */
+
+    if (
+        (expression.startsWith('"') && expression.endsWith('"')) ||
+        (expression.startsWith("'") && expression.endsWith("'"))
+    ) {
+        return expression.slice(1, -1);
+    }
+
+    /*
+     * ---------------------------------------------------------
+     * Boolean literals
+     * ---------------------------------------------------------
+     */
+
+    if (expression === "true") {
+        return true;
+    }
+
+    if (expression === "false") {
+        return false;
+    }
+
+    /*
+     * ---------------------------------------------------------
+     * Numeric literal
+     * ---------------------------------------------------------
+     */
+
+    if (/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(expression)) {
+        return Number(expression);
+    }
+
+    /*
+     * ---------------------------------------------------------
+     * Single variable
+     * ---------------------------------------------------------
+     */
+
+    if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(expression)) {
+        return callVariable(expression);
+    }
+
+    /*
+     * ---------------------------------------------------------
+     * Arithmetic expression
+     *
+     * Only + - * / and parentheses are allowed.
+     * ---------------------------------------------------------
+     */
+
+    const tokens = tokenizeVariableExpression(expression);
+
+    let position = 0;
+
+    function peek() {
+        return tokens[position];
+    }
+
+    function consume() {
+        return tokens[position++];
+    }
+
+    function parseExpression() {
+        let value = parseTerm();
+
+        while (peek() === "+" || peek() === "-") {
+            const operator = consume();
+            const right = parseTerm();
+
+            if (
+                typeof value !== "number" ||
+                typeof right !== "number"
+            ) {
+                throw new Error(
+                    `Cannot use "${operator}" on non-numeric values.`
+                );
+            }
+
+            if (operator === "+") {
+                value += right;
+            }
+            else {
+                value -= right;
+            }
+        }
+
+        return value;
+    }
+
+    function parseTerm() {
+        let value = parseFactor();
+
+        while (peek() === "*" || peek() === "/") {
+            const operator = consume();
+            const right = parseFactor();
+
+            if (
+                typeof value !== "number" ||
+                typeof right !== "number"
+            ) {
+                throw new Error(
+                    `Cannot use "${operator}" on non-numeric values.`
+                );
+            }
+
+            if (operator === "*") {
+                value *= right;
+            }
+            else {
+                if (right === 0) {
+                    throw new Error("Division by zero.");
+                }
+
+                value /= right;
+            }
+        }
+
+        return value;
+    }
+
+    function parseFactor() {
+        const token = consume();
+
+        if (token === "(") {
+            const value = parseExpression();
+
+            if (consume() !== ")") {
+                throw new Error("Missing closing parenthesis.");
+            }
+
+            return value;
+        }
+
+        if (token === "-") {
+            const value = parseFactor();
+
+            if (typeof value !== "number") {
+                throw new Error(
+                    "Unary minus can only be used with numbers."
+                );
+            }
+
+            return -value;
+        }
+
+        if (token === "+") {
+            return parseFactor();
+        }
+
+        if (typeof token !== "string") {
+            throw new Error("Invalid expression.");
+        }
+
+        if (/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(token)) {
+            return Number(token);
+        }
+
+        if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(token)) {
+            return callVariable(token);
+        }
+
+        throw new Error(
+            `Unknown expression token "${token}".`
+        );
+    }
+
+    const result = parseExpression();
+
+    if (position < tokens.length) {
+        throw new Error(
+            `Unexpected token "${tokens[position]}".`
+        );
+    }
+
+    return result;
+}
+
+function tokenizeVariableExpression(expression) {
+    const tokens = [];
+    let i = 0;
+
+    while (i < expression.length) {
+        const char = expression[i];
+
+        if (/\s/.test(char)) {
+            i++;
+            continue;
+        }
+
+        if ("()+-*/".includes(char)) {
+            tokens.push(char);
+            i++;
+            continue;
+        }
+
+        if (char === '"' || char === "'") {
+            const quote = char;
+            let value = "";
+            i++;
+
+            while (i < expression.length && expression[i] !== quote) {
+                value += expression[i];
+                i++;
+            }
+
+            if (i >= expression.length) {
+                throw new Error("Unclosed string.");
+            }
+
+            i++;
+
+            tokens.push(value);
+            continue;
+        }
+
+        const numberMatch = expression
+            .slice(i)
+            .match(/^(?:\d+(?:\.\d*)?|\.\d+)/);
+
+        if (numberMatch) {
+            tokens.push(numberMatch[0]);
+            i += numberMatch[0].length;
+            continue;
+        }
+
+        const identifierMatch = expression
+            .slice(i)
+            .match(/^[A-Za-z_][A-Za-z0-9_]*/);
+
+        if (identifierMatch) {
+            tokens.push(identifierMatch[0]);
+            i += identifierMatch[0].length;
+            continue;
+        }
+
+        throw new Error(
+            `Invalid character "${char}" in expression.`
+        );
+    }
+
+    return tokens;
+}
+
+function changeVariable(varName, newValue) {
+    varName = String(varName).trim();
+
+    let variableKey = null;
+    let variableType = null;
+
+    for (const key of Object.keys(scriptVariables)) {
+        const separator = key.indexOf(";");
+
+        const storedName = key.slice(0, separator);
+        const storedType = key.slice(separator + 1);
+
+        if (storedName === varName) {
+            variableKey = key;
+            variableType = storedType;
+            break;
+        }
+    }
+
+    if (!variableKey) {
+        throw new Error(
+            `change(): variable "${varName}" does not exist.`
+        );
+    }
+
+    const evaluatedValue =
+        evaluateScriptExpression(newValue);
+
+    /*
+     * Type checking
+     */
+
+    if (variableType === "text") {
+        if (typeof evaluatedValue !== "string") {
+            throw new Error(
+                `change(): "${varName}" is a text variable, ` +
+                `but the new value is ${typeof evaluatedValue}.`
+            );
+        }
+    }
+
+    else if (variableType === "num") {
+        if (
+            typeof evaluatedValue !== "number" ||
+            !Number.isFinite(evaluatedValue)
+        ) {
+            throw new Error(
+                `change(): "${varName}" is a number variable, ` +
+                `but the evaluated value is not a number.`
+            );
+        }
+    }
+
+    else if (variableType === "logic") {
+        if (typeof evaluatedValue !== "boolean") {
+            throw new Error(
+                `change(): "${varName}" is a logic variable, ` +
+                `but the evaluated value is not true or false.`
+            );
+        }
+    }
+
+    scriptVariables[variableKey] = evaluatedValue;
+
+    return evaluatedValue;
+}
 
 function scheduleRotatePart(
     partName,
@@ -2554,12 +3004,11 @@ function startSpeech(
 
 
 function waitForScriptedRotations(
-    waitTime = 1
+    waitTime = 1,
+    executionId = pythonExecutionId
 ) {
-
     const duration =
         Number(waitTime);
-
 
     if (
         !Number.isFinite(duration) ||
@@ -2572,13 +3021,25 @@ function waitForScriptedRotations(
         );
     }
 
-
     const startTime =
         waveClock.getElapsedTime();
 
     return new Promise(
         resolve => {
+
             function checkRotations() {
+
+                /*
+                 * The script was cancelled.
+                 * Stop waiting immediately.
+                 */
+                if (
+                    executionId !==
+                    pythonExecutionId
+                ) {
+                    resolve(false);
+                    return;
+                }
 
                 const elapsedTime =
                     waveClock.getElapsedTime() -
@@ -2589,16 +3050,14 @@ function waitForScriptedRotations(
                     activeSpeech.size === 0 &&
                     elapsedTime >= duration
                 ) {
-                    resolve();
+                    resolve(true);
                     return;
                 }
-
 
                 requestAnimationFrame(
                     checkRotations
                 );
             }
-
 
             checkRotations();
         }
@@ -2688,17 +3147,16 @@ function tryGrabObject(
 }
 
 
-async function runPythonSource(
-    source
-) {
+async function runPythonSource(source) {
 
+    const executionId = ++pythonExecutionId;
     resetAnimation = null;
 
     const calls =
         source
             .replace(/#.*$/gm, "")
             .matchAll(
-                /\b(rotatePart|cyclicMovement|reset|openHand|closeHand|wait|speak)\s*\(([\s\S]*?)\)/g
+                /\b(define|call|change|rotatePart|cyclicMovement|reset|openHand|closeHand|wait|speak)\s*\(([\s\S]*?)\)/g
             );
 
     let callCount = 0;
@@ -2707,6 +3165,10 @@ async function runPythonSource(
     for (
         const match of calls
     ) {
+
+        if (executionId !== pythonExecutionId) {
+            return 0;
+        }
 
         const [, functionName, argumentText] = match;
         const callStart = match.index || 0;
@@ -2737,10 +3199,9 @@ async function runPythonSource(
         const parsedArguments =
             getScriptArguments(argumentText);
 
+        const positional = parsedArguments.positional
 
-        if (
-            functionName === "rotatePart"
-        ) {
+        if (functionName === "rotatePart") {
             const [partName, axis, degree, positionalTime] =
                 parsedArguments.positional;
 
@@ -2750,6 +3211,82 @@ async function runPythonSource(
                 degree,
                 parsedArguments.values.time ?? positionalTime
             );
+        } else if (functionName === "define") {
+            const varName = positional[0];
+            const varType = positional[1];
+            const value = positional.length >= 3
+                ? positional[2]
+                : undefined;
+
+            if (varName === undefined) {
+                throw new Error(
+                    "define() requires a variable name."
+                );
+            }
+
+            if (varType === undefined) {
+                throw new Error(
+                    "define() requires a variable type."
+                );
+            }
+
+            defineVariable(varName, varType, value);
+        }
+
+        else if (functionName === "call") {
+            const varName = positional[0];
+
+            if (varName === undefined) {
+                throw new Error(
+                    "call() requires a variable name."
+                );
+            }
+
+            const value = callVariable(varName);
+
+            console.log(
+                `call("${varName}") →`,
+                value
+            );
+        }
+
+        else if (functionName === "change") {
+            const rawArguments = splitScriptArguments(argumentText);
+
+            if (rawArguments.length < 2) {
+                throw new Error(
+                    "change() requires a variable name and a new value."
+                );
+            }
+
+            const varName = parseScriptValue(rawArguments[0]);
+
+            let newValue = rawArguments[1].trim();
+
+            /*
+            * If the expression was written as:
+            *
+            * change("a", "a+1")
+            *
+            * remove the surrounding quotes so that the expression
+            * evaluator receives:
+            *
+            * a+1
+            */
+            if (
+                (newValue.startsWith('"') && newValue.endsWith('"')) ||
+                (newValue.startsWith("'") && newValue.endsWith("'"))
+            ) {
+                newValue = newValue.slice(1, -1);
+            }
+
+            if (varName === undefined) {
+                throw new Error(
+                    "change(): invalid variable name."
+                );
+            }
+
+            changeVariable(varName, newValue);
         } else if (
             functionName === "cyclicMovement"
         ) {
@@ -2959,6 +3496,7 @@ function startResetAnimation() {
 
 function fullResetScene() {
 
+    pythonExecutionId++;
     resetAnimation = null;
     lWaveAnimationEnabled = false;
     rWaveAnimationEnabled = false;
@@ -4132,11 +4670,24 @@ function executeConsoleCommand() {
             printPartList(consoleOutput, groupList);
             break;
         }
+        case "VARS": {
+            let variables = [];
+            for (let index = 0; index < Object.keys(scriptVariables).length; index++) {
+                const key = Object.keys(scriptVariables)[index];
+                const val = Object.values(scriptVariables)[index];
+                variables.push(key.split(";")[0]+": "+key.split(";")[1]+" = "+val);
+            };
+            printList(consoleOutput, variables);
+            break;
+        }
         case "RESET": {
             startResetAnimation();
             break;
         }
         case "FRESET": {
+            for (const key of Object.keys(scriptVariables)) {
+                delete scriptVariables[key];
+            }
             fullResetScene();
             break;
         }
