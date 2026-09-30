@@ -41,6 +41,7 @@ let daggerTexture2 = null;
 let modelRoot = new THREE.Group();
 let pythonExecutionId = 0;
 let scriptVariables = {};
+let storedScripts = {};
 const armJoints = {};
 const thumbJoints = {};
 const grabbableObjects = [];
@@ -2448,6 +2449,589 @@ function tokenizeVariableExpression(expression) {
     return tokens;
 }
 
+function tokenizeLogicalExpression(expression) {
+    const tokens = [];
+
+    let i = 0;
+
+    while (i < expression.length) {
+        const character = expression[i];
+
+        if (/\s/.test(character)) {
+            i++;
+            continue;
+        }
+
+        /*
+         * Parentheses
+         */
+        if (
+            character === "(" ||
+            character === ")"
+        ) {
+            tokens.push(character);
+            i++;
+            continue;
+        }
+
+        /*
+         * Comparison operators
+         *
+         * Check the two-character operators first.
+         */
+        const twoCharacterOperator =
+            expression.slice(i, i + 2);
+
+        if (
+            twoCharacterOperator === "<=" ||
+            twoCharacterOperator === ">=" ||
+            twoCharacterOperator === "==" ||
+            twoCharacterOperator === "!="
+        ) {
+            tokens.push({
+                type: "operator",
+                value: twoCharacterOperator
+            });
+
+            i += 2;
+            continue;
+        }
+
+        /*
+         * Single-character comparison operators
+         */
+        if (
+            character === "<" ||
+            character === ">"
+        ) {
+            tokens.push({
+                type: "operator",
+                value: character
+            });
+
+            i++;
+            continue;
+        }
+
+        /*
+         * String literal
+         */
+        if (
+            character === '"' ||
+            character === "'"
+        ) {
+            const quote = character;
+            let value = "";
+            let escaped = false;
+
+            i++;
+
+            while (i < expression.length) {
+                const current =
+                    expression[i];
+
+                if (escaped) {
+                    value += current;
+                    escaped = false;
+                    i++;
+                    continue;
+                }
+
+                if (current === "\\") {
+                    escaped = true;
+                    i++;
+                    continue;
+                }
+
+                if (current === quote) {
+                    break;
+                }
+
+                value += current;
+                i++;
+            }
+
+            if (
+                i >= expression.length ||
+                expression[i] !== quote
+            ) {
+                throw new Error(
+                    "Unterminated string in logical expression."
+                );
+            }
+
+            tokens.push({
+                type: "value",
+                value
+            });
+
+            i++;
+            continue;
+        }
+
+        /*
+         * Number
+         */
+        const numberMatch =
+            expression
+                .slice(i)
+                .match(
+                    /^(?:\d+(?:\.\d*)?|\.\d+)/
+                );
+
+        if (numberMatch) {
+            tokens.push({
+                type: "value",
+                value: Number(numberMatch[0])
+            });
+
+            i += numberMatch[0].length;
+            continue;
+        }
+
+        /*
+         * Identifier / keyword
+         */
+        const identifierMatch =
+            expression
+                .slice(i)
+                .match(
+                    /^[A-Za-z_][A-Za-z0-9_]*/
+                );
+
+        if (identifierMatch) {
+            const word =
+                identifierMatch[0];
+
+            const upper =
+                word.toUpperCase();
+
+            if (
+                upper === "NOT" ||
+                upper === "AND" ||
+                upper === "OR"
+            ) {
+                tokens.push(upper);
+            }
+            else if (upper === "TRUE") {
+                tokens.push({
+                    type: "value",
+                    value: true
+                });
+            }
+            else if (upper === "FALSE") {
+                tokens.push({
+                    type: "value",
+                    value: false
+                });
+            }
+            else {
+                tokens.push({
+                    type: "variable",
+                    value: word
+                });
+            }
+
+            i += word.length;
+            continue;
+        }
+
+        throw new Error(
+            `Invalid character "${character}" in logical expression.`
+        );
+    }
+
+    return tokens;
+}
+
+function evaluateLogicalExpression(expression) {
+    expression =
+        String(expression).trim();
+
+    if (!expression) {
+        return true;
+    }
+
+    const tokens =
+        tokenizeLogicalExpression(
+            expression
+        );
+
+    let position = 0;
+
+    function peek() {
+        return tokens[position];
+    }
+
+    function consume(expected = undefined) {
+        const token = tokens[position];
+
+        if (
+            expected !== undefined &&
+            token !== expected
+        ) {
+            throw new Error(
+                `Expected "${expected}" in logical expression.`
+            );
+        }
+
+        position++;
+
+        return token;
+    }
+
+    /*
+     * Resolve a value token.
+     *
+     * Unlike the old implementation, variables are NOT
+     * immediately converted to Boolean. We need their
+     * actual values for comparisons such as:
+     *
+     * index < 5
+     */
+    function parseValue() {
+        const token = peek();
+
+        if (
+            token &&
+            typeof token === "object"
+        ) {
+            consume();
+
+            if (token.type === "value") {
+                return token.value;
+            }
+
+            if (token.type === "variable") {
+                return callVariable(
+                    token.value
+                );
+            }
+        }
+
+        throw new Error(
+            "Expected a value in logical expression."
+        );
+    }
+
+    /*
+     * Primary expression
+     *
+     * Handles:
+     *
+     *     5
+     *     index
+     *     true
+     *     (index < 5)
+     */
+    function parsePrimary() {
+        if (peek() === "(") {
+            consume("(");
+
+            const value =
+                parseOr();
+
+            if (peek() !== ")") {
+                throw new Error(
+                    "Missing closing ')' in logical expression."
+                );
+            }
+
+            consume(")");
+
+            return value;
+        }
+
+        return parseValue();
+    }
+
+    /*
+     * Comparison
+     *
+     * Handles:
+     *
+     *     <
+     *     <=
+     *     >
+     *     >=
+     *     ==
+     *     !=
+     */
+    function parseComparison() {
+        const left =
+            parsePrimary();
+
+        const operator =
+            peek();
+
+        if (
+            !operator ||
+            typeof operator !== "object" ||
+            operator.type !== "operator"
+        ) {
+            return Boolean(left);
+        }
+
+        consume();
+
+        const right =
+            parsePrimary();
+
+        switch (operator.value) {
+            case "<":
+                return left < right;
+
+            case "<=":
+                return left <= right;
+
+            case ">":
+                return left > right;
+
+            case ">=":
+                return left >= right;
+
+            case "==":
+                return left === right;
+
+            case "!=":
+                return left !== right;
+
+            default:
+                throw new Error(
+                    `Unknown comparison operator "${operator.value}".`
+                );
+        }
+    }
+
+    /*
+     * NOT
+     */
+    function parseNot() {
+        if (peek() === "NOT") {
+            consume("NOT");
+
+            return !parseNot();
+        }
+
+        return parseComparison();
+    }
+
+    /*
+     * AND
+     */
+    function parseAnd() {
+        let value =
+            parseNot();
+
+        while (peek() === "AND") {
+            consume("AND");
+
+            const right =
+                parseNot();
+
+            value =
+                value && right;
+        }
+
+        return value;
+    }
+
+    /*
+     * OR
+     */
+    function parseOr() {
+        let value =
+            parseAnd();
+
+        while (peek() === "OR") {
+            consume("OR");
+
+            const right =
+                parseAnd();
+
+            value =
+                value || right;
+        }
+
+        return value;
+    }
+
+    const result =
+        parseOr();
+
+    if (position < tokens.length) {
+        throw new Error(
+            "Unexpected token in logical expression."
+        );
+    }
+
+    return Boolean(result);
+}
+
+function extractScriptDefinitions(source) {
+    const definitions = {};
+    const lines = source.split(/\r?\n/);
+
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+
+        /*
+         * Supports both:
+         *
+         *     def test:
+         *
+         * and:
+         *
+         *     def test():
+         */
+        const match = line.match(
+            /^(\s*)def\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\(\s*\))?\s*:/
+        );
+
+        if (!match) {
+            continue;
+        }
+
+        const indentation = match[1]
+            .replace(/\t/g, "    ")
+            .length;
+
+        const scriptName = match[2];
+        const body = [];
+
+        i++;
+
+        while (i < lines.length) {
+            const bodyLine = lines[i];
+
+            /*
+             * Completely blank lines belong to the body.
+             */
+            if (bodyLine.trim() === "") {
+                body.push("");
+                i++;
+                continue;
+            }
+
+            const indentationMatch =
+                bodyLine.match(/^\s*/);
+
+            const bodyIndentation =
+                indentationMatch
+                    ? indentationMatch[0]
+                        .replace(/\t/g, "    ")
+                        .length
+                    : 0;
+
+            /*
+             * A line with equal or less indentation
+             * means that the definition has ended.
+             */
+            if (bodyIndentation <= indentation) {
+                i--;
+                break;
+            }
+
+            body.push(bodyLine);
+            i++;
+        }
+
+        definitions[scriptName] =
+            body.join("\n");
+    }
+
+    return definitions;
+}
+
+function extractScriptCalls(source) {
+    const calls = [];
+
+    const functionPattern =
+         /\b(define|log|call|change|rotatePart|cyclicMovement|reset|openHand|closeHand|wait|speak|subroutine)\s*\(/g;
+
+    let match;
+
+    while ((match = functionPattern.exec(source)) !== null) {
+        const functionName = match[1];
+        const openParenthesis =
+            functionPattern.lastIndex - 1;
+
+        let depth = 1;
+        let i = openParenthesis + 1;
+
+        let quote = null;
+        let escaped = false;
+
+        for (; i < source.length; i++) {
+            const character = source[i];
+
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+
+            if (character === "\\") {
+                escaped = true;
+                continue;
+            }
+
+            if (quote !== null) {
+                if (character === quote) {
+                    quote = null;
+                }
+
+                continue;
+            }
+
+            if (
+                character === '"' ||
+                character === "'"
+            ) {
+                quote = character;
+                continue;
+            }
+
+            if (character === "(") {
+                depth++;
+            }
+            else if (character === ")") {
+                depth--;
+
+                if (depth === 0) {
+                    break;
+                }
+            }
+        }
+
+        if (depth !== 0) {
+            throw new Error(
+                `${functionName}(): missing closing parenthesis.`
+            );
+        }
+
+        calls.push({
+            functionName,
+            argumentText:
+                source.slice(
+                    openParenthesis + 1,
+                    i
+                ),
+            index: match.index,
+            length:
+                i - match.index + 1
+        });
+
+        /*
+         * Don't allow the regular-expression scanner
+         * to find functions inside this call as separate
+         * top-level operations.
+         */
+        functionPattern.lastIndex = i + 1;
+    }
+
+    return calls;
+}
+
 function changeVariable(varName, newValue) {
     varName = String(varName).trim();
 
@@ -2513,6 +3097,322 @@ function changeVariable(varName, newValue) {
     scriptVariables[variableKey] = evaluatedValue;
 
     return evaluatedValue;
+}
+
+function parseSubroutineArguments(argumentText) {
+    const argumentsList =
+        splitScriptArguments(
+            argumentText
+        );
+
+    let script = undefined;
+    let repeat = false;
+    let condition = "true";
+
+    for (const rawArgument of argumentsList) {
+        const argument =
+            rawArgument.trim();
+
+        if (!argument) {
+            continue;
+        }
+
+        const equalsIndex =
+            findTopLevelEquals(argument);
+
+        if (equalsIndex === -1) {
+            if (script !== undefined) {
+                throw new Error(
+                    "subroutine(): only one positional script argument is allowed."
+                );
+            }
+
+            script =
+                parseScriptValue(argument);
+
+            continue;
+        }
+
+        const key =
+            argument
+                .slice(0, equalsIndex)
+                .trim()
+                .toLowerCase();
+
+        const value =
+            argument
+                .slice(equalsIndex + 1)
+                .trim();
+
+        if (key === "repeat") {
+            const parsed =
+                parseScriptValue(value);
+
+            if (typeof parsed !== "boolean") {
+                throw new Error(
+                    "subroutine(): repeat must be true or false."
+                );
+            }
+
+            repeat = parsed;
+        }
+        else if (key === "condition") {
+            condition = value;
+
+            /*
+             * Remove surrounding quotes if the
+             * entire condition was supplied as a string.
+             */
+            if (
+                (
+                    condition.startsWith('"') &&
+                    condition.endsWith('"')
+                ) ||
+                (
+                    condition.startsWith("'") &&
+                    condition.endsWith("'")
+                )
+            ) {
+                condition =
+                    condition.slice(
+                        1,
+                        -1
+                    );
+            }
+        }
+        else {
+            throw new Error(
+                `subroutine(): unknown argument "${key}".`
+            );
+        }
+    }
+
+    if (script === undefined) {
+        throw new Error(
+            "subroutine() requires a script name."
+        );
+    }
+
+    return {
+        script,
+        repeat,
+        condition
+    };
+}
+
+function findTopLevelEquals(text) {
+    let parenthesisDepth = 0;
+
+    let bracketDepth = 0;
+
+    let quote = null;
+    let escaped = false;
+
+    for (let i = 0; i < text.length; i++) {
+        const character = text[i];
+
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+
+        if (character === "\\") {
+            escaped = true;
+            continue;
+        }
+
+        if (quote !== null) {
+            if (character === quote) {
+                quote = null;
+            }
+
+            continue;
+        }
+
+        if (
+            character === '"' ||
+            character === "'"
+        ) {
+            quote = character;
+            continue;
+        }
+
+        if (character === "(") {
+            parenthesisDepth++;
+        }
+        else if (character === ")") {
+            parenthesisDepth--;
+        }
+        else if (character === "[") {
+            bracketDepth++;
+        }
+        else if (character === "]") {
+            bracketDepth--;
+        }
+        else if (
+            character === "=" &&
+            parenthesisDepth === 0 &&
+            bracketDepth === 0
+        ) {
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+function getStoredScript(scriptName) {
+    scriptName = String(scriptName).trim();
+
+    /*
+     * First check explicitly stored scripts.
+     */
+    if (
+        Object.prototype.hasOwnProperty.call(
+            storedScripts,
+            scriptName
+        )
+    ) {
+        return storedScripts[scriptName];
+    }
+
+    /*
+     * Then check scripts loaded through
+     * SCRIPT LOAD or the default test.py.
+     */
+    if (
+        loadedPythonFiles.has(scriptName)
+    ) {
+        return loadedPythonFiles.get(scriptName).source;
+    }
+
+    /*
+     * Allow omitting .py:
+     *
+     * subroutine("test")
+     *
+     * becomes:
+     *
+     * test.py
+     */
+    if (!scriptName.endsWith(".py")) {
+        const withExtension =
+            `${scriptName}.py`;
+
+        if (
+            Object.prototype.hasOwnProperty.call(
+                storedScripts,
+                withExtension
+            )
+        ) {
+            return storedScripts[withExtension];
+        }
+
+        if (
+            loadedPythonFiles.has(withExtension)
+        ) {
+            return loadedPythonFiles.get(withExtension).source;
+        }
+    }
+
+    return undefined;
+}
+
+async function runSubroutine(
+    scriptName,
+    repeat = false,
+    condition = "true",
+    executionId = pythonExecutionId,
+    definitions = {}
+) {
+    scriptName =
+        String(scriptName).trim();
+
+    /*
+     * First look for a stored script.
+     */
+    let scriptSource =
+        getStoredScript(scriptName);
+
+    /*
+     * If there is no stored script, fall back
+     * to a def block from the current source.
+     */
+    if (scriptSource === undefined) {
+        if (
+            Object.prototype.hasOwnProperty.call(
+                definitions,
+                scriptName
+            )
+        ) {
+            scriptSource =
+                definitions[scriptName];
+        }
+        else {
+            throw new Error(
+                `subroutine(): script "${scriptName}" does not exist.`
+            );
+        }
+    }
+
+    do {
+
+        /*
+         * FRESET cancelled the entire
+         * execution tree.
+         */
+        if (
+            executionId !==
+            pythonExecutionId
+        ) {
+            return false;
+        }
+
+        /*
+         * Check the condition before every
+         * invocation.
+         */
+        const shouldRun =
+            evaluateLogicalExpression(
+                condition
+            );
+
+        if (!shouldRun) {
+            return true;
+        }
+
+        /*
+         * Execute the stored script.
+         *
+         * The same executionId is passed down,
+         * so FRESET also cancels nested scripts.
+         */
+        await runPythonSource(
+            scriptSource,
+            executionId,
+            definitions
+        );
+
+        /*
+         * A nested script may have been
+         * cancelled while it was running.
+         */
+        if (
+            executionId !==
+            pythonExecutionId
+        ) {
+            return false;
+        }
+
+        if (!repeat) {
+            break;
+        }
+
+    } while (
+        executionId === pythonExecutionId
+    );
+
+    return true;
 }
 
 function scheduleRotatePart(
@@ -3147,31 +4047,43 @@ function tryGrabObject(
 }
 
 
-async function runPythonSource(source) {
+async function runPythonSource(
+    source,
+    inheritedExecutionId = null,
+    definitions = null
+) {
 
-    const executionId = ++pythonExecutionId;
+    const executionId =
+        inheritedExecutionId ??
+        ++pythonExecutionId;
+
     resetAnimation = null;
 
+    if (definitions === null) {
+        definitions =
+            extractScriptDefinitions(source);
+    }
+
     const calls =
-        source
-            .replace(/#.*$/gm, "")
-            .matchAll(
-                /\b(define|call|change|rotatePart|cyclicMovement|reset|openHand|closeHand|wait|speak)\s*\(([\s\S]*?)\)/g
-            );
+        extractScriptCalls(source);
 
     let callCount = 0;
 
-
-    for (
-        const match of calls
-    ) {
-
-        if (executionId !== pythonExecutionId) {
+    for (const call of calls) {
+        if (
+            executionId !==
+            pythonExecutionId
+        ) {
             return 0;
         }
 
-        const [, functionName, argumentText] = match;
-        const callStart = match.index || 0;
+        const {
+            functionName,
+            argumentText,
+            index: callStart,
+            length: callLength
+        } = call;
+
         const lineStart =
             source.lastIndexOf("\n", callStart) + 1;
 
@@ -3191,7 +4103,7 @@ async function runPythonSource(source) {
         codeInspectorContent.value =
             source.slice(
                 0,
-                callStart + match[0].length
+                callStart + callLength
             );
         codeInspectorContent.scrollTop =
             codeInspectorContent.scrollHeight;
@@ -3231,23 +4143,6 @@ async function runPythonSource(source) {
             }
 
             defineVariable(varName, varType, value);
-        }
-
-        else if (functionName === "call") {
-            const varName = positional[0];
-
-            if (varName === undefined) {
-                throw new Error(
-                    "call() requires a variable name."
-                );
-            }
-
-            const value = callVariable(varName);
-
-            console.log(
-                `call("${varName}") →`,
-                value
-            );
         }
 
         else if (functionName === "change") {
@@ -3334,6 +4229,33 @@ async function runPythonSource(source) {
                 parsedArguments.values.speed ??
                     parsedArguments.positional[2]
             );
+        } else if (
+            functionName === "log"
+        ) {
+            printList(consoleOutput, [parsedArguments.positional[0]]);
+        } else if (functionName === "subroutine") {
+            const {
+                script,
+                repeat,
+                condition
+            } = parseSubroutineArguments(
+                argumentText
+            );
+
+            await runSubroutine(
+                script,
+                repeat,
+                condition,
+                executionId,
+                definitions
+            );
+
+            if (
+                executionId !==
+                pythonExecutionId
+            ) {
+                return 0;
+            }
         }
 
 
@@ -4482,6 +5404,29 @@ function createNewPythonFile(
         `Created ${fileName}.`;
 }
 
+function editPythonFile(
+    requestedName
+) {
+
+    let fileName = requestedName.trim()
+    let storedFile = loadedPythonFiles.get(fileName);
+
+    if (
+        !fileName.toLowerCase().endsWith(".py")
+    ) {
+        fileName += ".py";
+    }
+
+    inspectedPythonFile = fileName;
+    codeInspectorTitle.textContent =
+        `Inspecting: ${fileName}`;
+    codeInspectorContent.value = storedFile.source;
+    codeInspectorContent.readOnly = false;
+    pushCodeModification.disabled = false;
+    consoleOutput.textContent =
+        `Editing ${fileName}.`;
+}
+
 
 pushCodeModification.addEventListener(
     "click",
@@ -4517,6 +5462,7 @@ function executeConsoleCommand() {
 
 
     if (!commandText) {
+        consoleOutput.textContent = "";
         return;
     }
 
@@ -4550,9 +5496,18 @@ function executeConsoleCommand() {
                 createNewPythonFile(
                     command.slice(2).join(" ")
                 );
+            } else if (
+                scriptCommand === "EDIT"
+            ) {
+                if (command.slice(2).join(" ") != "") {
+                    editPythonFile(
+                        command.slice(2).join(" ")
+                    )
+                } else {
+                    errorElement.textContent = "Select a script to edit. Run \"RUN\" to list all scripts."
+                }
             } else {
-                errorElement.textContent =
-                    "SCRIPT requires LOAD, SAVE, SAVETHIS, or NEW.";
+                errorElement.textContent = "SCRIPT requires LOAD, SAVE, SAVETHIS, EDIT, or NEW.";
             }
             break;
         }
@@ -4604,8 +5559,7 @@ function executeConsoleCommand() {
                     codeInspectorContent.readOnly = false;
                     pushCodeModification.disabled = false;
                     executingPythonFile = null;
-                    consoleOutput.textContent =
-                        `Running ${fileName} (${callCount} movement calls).`;
+                    alert(`${fileName} ran successfully (${callCount} movement calls).`);
                 }
             ).catch(
                 error => {
@@ -4705,7 +5659,53 @@ function executeConsoleCommand() {
                 "SCRIPT SAVETHIS - Saves the currently opened script as a .py file",
                 "RUN - Lists all loaded scripts ready for execution",
                 "RUN [script name] - Runs the given script. \"test.py\" is included in the app by default.",
-                "PYHELP - Instructions to how the script of the website works."
+                "FUNCHELP - Instructions to how the functions used to control the robot work.",
+                "SCRIPTHELP - Instructions to how the scripting language of the website works."
+            ]
+            printList(consoleOutput, manual)
+            break;
+        }
+        case "FUNCHELP": {
+            const manual = [
+                "log(msg:string):",
+                "- logs a message to the console output",
+                "rotatePart(partName:string, axis:string, degree:float, timeFactor:float=1):",
+                "- Rotates [partName] on [axis] by [degree] with [timeFactor].",
+                "- timeFactor is an optional argument. 1 means a 360° rotation would take 1 second.",
+                "cyclicMovement(partName:string, axis:string, amplitude:float, speed:float, phase:float, offset:float=0):",
+                "- Defines a continuous rotation (such as constant waving) of [partName] on [axis] by [amplitude] with [speed] and [phase].",
+                "- offset is an optional argument. Defines the starting point of the rotation.",
+                "reset():",
+                "- Resets all parts of the robot to their initial position and rotation.",
+                "openHand(side:string):",
+                "- Opens [side] palm of the robot.",
+                "closeHand(side:string):",
+                "- Closes [side] palm of the robot, allowing it to grab objects.",
+                "wait(time:float=0):",
+                "- Waits until all movements finish before the function, plus an additional [time] seconds.",
+                "speak(text:string, pitch:float=1, speed:float=1):",
+                "- Speaks [text] with [pitch] at [speed], using Gemini's TTS API.",
+                "- NOTE: the license of the app is very limited.",
+                "define(varName:string, varType:string, value:any):",
+                "- Creates a new variable called [varName] of [varType] (num/text/logic), with [value].",
+                "- The assigned value must match the type of the variable (eg. num cannot be \"Hi!\")",
+                "change(varName:string, newValue:any):",
+                "- Changes [varName] to [newValue] of the appropriate type.",
+                "subroutine(script:string, repeat:boolean, condition:boolean):",
+                "- Runs [script] as a subroutine of the program, halting the execution of every other process.",
+                "- If [repeat] is TRUE, the execution will loop, which it is not by default.",
+                "- The execution will only commence if [condition] is TRUE, which it is by default.",
+            ]
+            printList(consoleOutput, manual)
+            break;
+        }
+        case "SCRIPTHELP": {
+            const manual = [
+                "Every instruction should be written with line breaks seperating them, similarly to python code.",
+                "Variables can be referred to as parameters (log(myNumber) will log the variable myNumber if it was  defined earlier.)",
+                "All basic mathematical operators, parentheses, and comparators featured in python are supported.",
+                "The supported logical operators are NOT, AND, and OR.",
+                "Subroutines can be defined in seperate scripts, but using a \"def mySubroutine():\" notation with nested code is also supported.",
             ]
             printList(consoleOutput, manual)
             break;
